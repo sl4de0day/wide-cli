@@ -2,6 +2,7 @@ import { readFileTool, writeFileTool, editFileTool } from "./fs.js";
 import { listDirTool, searchFilesTool } from "./search.js";
 import { runCommandTool } from "./shell.js";
 import { securityScanTool } from "./security.js";
+import { httpRequestTool } from "./http.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
 
 export const ALL_TOOLS: Record<string, Tool> = {
@@ -12,6 +13,7 @@ export const ALL_TOOLS: Record<string, Tool> = {
   search_files: searchFilesTool,
   run_command: runCommandTool,
   run_security_scan: securityScanTool,
+  send_http_request: httpRequestTool,
 };
 
 export async function executeTool(
