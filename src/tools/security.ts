@@ -83,7 +83,7 @@ export const securityScanTool: Tool = {
   async execute(params, context): Promise<ToolResult> {
     try {
       const scanDir = resolve(context.workingDirectory, params.path || ".");
-      console.log(`\n${pc.cyan("🛡️ Running Wide SAST Security Engine on:")} ${pc.bold(relative(context.workingDirectory, scanDir) || ".")}`);
+      console.log(`\n${pc.cyan("[SCAN] Wide SAST Engine:")} ${pc.bold(relative(context.workingDirectory, scanDir) || ".")}`);
 
       const files = await fg(["**/*.{js,ts,jsx,tsx,py,php,go,rb,java,cs}"], {
         cwd: scanDir,
@@ -115,7 +115,6 @@ export const securityScanTool: Tool = {
             }
           }
         } catch {
-          // ignore unreadable
         }
       }
 

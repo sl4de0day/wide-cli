@@ -68,7 +68,7 @@ export class ConfigManager {
         return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
       }
     } catch {
-      // Fallback to default
+      return { ...DEFAULT_CONFIG };
     }
     return { ...DEFAULT_CONFIG };
   }

@@ -82,21 +82,18 @@ export class Agent {
 
       finalAssistantText = response.content;
 
-      // Add assistant response to history
       this.messages.push({
         role: "assistant",
         content: response.content,
         toolCalls: response.toolCalls
       });
 
-      // If no tool calls requested, the agent is done
       if (!response.toolCalls || response.toolCalls.length === 0) {
         break;
       }
 
-      // Execute requested tools
       for (const tc of response.toolCalls) {
-        console.log(`\n${pc.cyan("⚡ Tool Call:")} ${pc.bold(tc.name)} ${pc.dim(JSON.stringify(tc.arguments))}`);
+        console.log(`\n${pc.cyan("[TOOL]")} ${pc.bold(tc.name)} ${pc.dim(JSON.stringify(tc.arguments))}`);
         spinner.start(`Executing ${tc.name}...`);
 
         const result = await executeTool(tc.name, tc.arguments, {
@@ -114,7 +111,6 @@ export class Agent {
 
         const toolOutput = result.success ? result.output : `ERROR: ${result.error}`;
         
-        // Feed tool response back into conversation history
         this.messages.push({
           role: "tool",
           name: tc.name,

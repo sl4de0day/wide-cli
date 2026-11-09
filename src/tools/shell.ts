@@ -20,7 +20,7 @@ export const runCommandTool: Tool = {
     const timeout = params.timeoutMs || 30000;
 
     if (!context.autoApproveRun) {
-      console.log(`\n${pc.yellow("⚠ Agent requests command execution:")} ${pc.bold(cmd)}`);
+      console.log(`\n${pc.yellow("[WARN] Agent requests command execution:")} ${pc.bold(cmd)}`);
     }
 
     return new Promise((resolvePromise) => {

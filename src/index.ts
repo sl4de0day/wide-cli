@@ -10,7 +10,7 @@ const program = new Command();
 
 program
   .name("wide")
-  .description("Terminal-first autonomous AI coding & security agent for the Wide ecosystem")
+  .description("Terminal-first autonomous AI coding and security agent for the Wide ecosystem")
   .version("0.1.0")
   .argument("[prompt...]", "Optional one-shot prompt for the agent to execute")
   .option("-p, --provider <provider>", "LLM provider to use (gemini, ollama, claude, deepseek)")
@@ -19,14 +19,12 @@ program
   .action(async (promptParts, options) => {
     const userPrompt = Array.isArray(promptParts) ? promptParts.join(" ").trim() : "";
 
-    // If flags passed, temporarily update config
     if (options.yes) {
       configManager.set("autoApproveWrite", true);
       configManager.set("autoApproveRun", true);
     }
 
     if (userPrompt) {
-      // One-shot mode
       try {
         const provider = createProvider(options.provider, options.model);
         const agent = new Agent(process.cwd(), provider);
@@ -36,21 +34,18 @@ program
         process.exit(1);
       }
     } else {
-      // Interactive REPL mode
       await startRepl();
     }
   });
 
-// Standalone security scan command: wide scan
 program
   .command("scan [path]")
-  .description("Run Wide's native SAST security engine on the current workspace or target directory")
+  .description("Run Wide native SAST security engine on the current workspace or target directory")
   .action(async (targetPath = ".") => {
     const res = await executeTool("run_security_scan", { path: targetPath }, { workingDirectory: process.cwd() });
     console.log(res.output);
   });
 
-// Config management commands: wide config
 const configCmd = program
   .command("config")
   .description("Manage Wide CLI configuration and API keys");
@@ -70,11 +65,11 @@ configCmd
 
 configCmd
   .command("set <key> <value>")
-  .description("Set configuration property (e.g. 'wide config set provider ollama')")
+  .description("Set configuration property")
   .action((key, value) => {
     try {
       configManager.set(key as any, value);
-      console.log(pc.green(`✔ Updated '${key}' to '${value}'`));
+      console.log(pc.green(`[OK] Updated '${key}' to '${value}'`));
     } catch (err: any) {
       console.error(pc.red(`Failed to set config: ${err.message}`));
     }
@@ -82,11 +77,11 @@ configCmd
 
 configCmd
   .command("set-key <provider> <apiKey>")
-  .description("Store API key for a provider (e.g. 'wide config set-key gemini AIzaSy...')")
+  .description("Store API key for a provider")
   .action((provider, apiKey) => {
     try {
       configManager.setApiKey(provider as any, apiKey);
-      console.log(pc.green(`✔ Stored API key for provider '${provider}' in ~/.wide/config.json`));
+      console.log(pc.green(`[OK] Stored API key for provider '${provider}' in ~/.wide/config.json`));
     } catch (err: any) {
       console.error(pc.red(`Failed to set key: ${err.message}`));
     }

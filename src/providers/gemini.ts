@@ -20,11 +20,9 @@ export class GeminiProvider implements LLMProvider {
       throw new Error("Gemini API key is not configured. Run 'wide config set-key gemini <YOUR_KEY>' or set GEMINI_API_KEY.");
     }
 
-    // Extract system instruction if present
     const systemMsg = messages.find(m => m.role === "system");
     const chatMsgs = messages.filter(m => m.role !== "system");
 
-    // Format contents for Gemini
     const contents = chatMsgs.map(m => {
       if (m.role === "user") {
         return { role: "user", parts: [{ text: m.content }] };
@@ -58,7 +56,6 @@ export class GeminiProvider implements LLMProvider {
       return { role: "user", parts: [{ text: m.content }] };
     });
 
-    // Format tool declarations
     const functionDeclarations = tools.map(t => ({
       name: t.name,
       description: t.description,
@@ -138,7 +135,6 @@ export class GeminiProvider implements LLMProvider {
             }
           }
         } catch {
-          // ignore stream parse chunk
         }
       }
     }

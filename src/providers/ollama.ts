@@ -96,7 +96,6 @@ export class OllamaProvider implements LLMProvider {
             }
           }
         } catch {
-          // ignore
         }
       }
     }

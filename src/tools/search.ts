@@ -30,11 +30,11 @@ export const listDirTool: Tool = {
           const full = join(dir, item.name);
           const rel = relative(targetPath, full);
           if (item.isDirectory()) {
-            entries.push(`📁 ${rel}/`);
+            entries.push(`[DIR]  ${rel}/`);
             traverse(full, currentDepth + 1);
           } else {
             const size = statSync(full).size;
-            entries.push(`📄 ${rel} (${size} B)`);
+            entries.push(`[FILE] ${rel} (${size} B)`);
           }
         }
       };
@@ -91,7 +91,6 @@ export const searchFilesTool: Tool = {
             }
           }
         } catch {
-          // Skip binary files
         }
       }
 

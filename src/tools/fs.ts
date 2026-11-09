@@ -74,9 +74,8 @@ export const writeFileTool: Tool = {
 
       const oldContent = existsSync(fullPath) ? readFileSync(fullPath, "utf8") : "";
       
-      // If interactive confirmation is enabled and not auto-approved
       if (!context.autoApproveWrite) {
-        console.log(`\n${pc.cyan("✎ Proposed file write:")} ${pc.bold(relPath)}`);
+        console.log(`\n${pc.cyan("[WRITE]")} ${pc.bold(relPath)}`);
         const diff = formatUnifiedDiff(relPath, oldContent, params.content);
         console.log(diff || pc.dim("(New file created)"));
       }
@@ -127,7 +126,7 @@ export const editFileTool: Tool = {
       const newContent = content.replace(params.target, params.replacement);
 
       if (!context.autoApproveWrite) {
-        console.log(`\n${pc.cyan("✎ Proposed edit in:")} ${pc.bold(relPath)}`);
+        console.log(`\n${pc.cyan("[EDIT]")} ${pc.bold(relPath)}`);
         const diff = formatUnifiedDiff(relPath, content, newContent);
         console.log(diff);
       }
