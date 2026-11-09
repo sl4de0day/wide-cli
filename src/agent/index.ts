@@ -3,6 +3,7 @@ import { configManager } from "../config/index.js";
 import { createProvider, type ChatMessage, type LLMProvider } from "../providers/index.js";
 import { executeTool, getToolDefinitions } from "../tools/index.js";
 import { Spinner } from "../ui/spinner.js";
+import { ContextManager } from "./context.js";
 
 const SYSTEM_PROMPT = `You are Wide CLI, a security-first autonomous AI coding and web penetration testing agent.
 You operate directly in the user's terminal workspace.
@@ -20,10 +21,12 @@ export class Agent {
   private messages: ChatMessage[] = [];
   private provider: LLMProvider;
   private workingDirectory: string;
+  private contextManager: ContextManager;
 
   constructor(workingDirectory = process.cwd(), provider?: LLMProvider) {
     this.workingDirectory = workingDirectory;
     this.provider = provider || createProvider();
+    this.contextManager = new ContextManager();
     this.messages.push({
       role: "system",
       content: SYSTEM_PROMPT
@@ -55,6 +58,8 @@ export class Agent {
 
     while (iteration < cfg.maxIterations) {
       iteration++;
+      this.messages = this.contextManager.compactMessages(this.messages);
+
       spinner.start("Wide thinking...");
 
       let streamedText = "";

@@ -2,9 +2,29 @@ import { Command } from "commander";
 import pc from "picocolors";
 import { Agent } from "./agent/index.js";
 import { configManager } from "./config/index.js";
+import { loadWorkspaceConfig } from "./config/workspace.js";
 import { createProvider } from "./providers/index.js";
 import { startRepl } from "./repl/index.js";
 import { executeTool } from "./tools/index.js";
+
+async function readStdin(): Promise<string> {
+  if (process.stdin.isTTY) {
+    return "";
+  }
+  return new Promise((resolvePromise) => {
+    let data = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", chunk => {
+      data += chunk;
+    });
+    process.stdin.on("end", () => {
+      resolvePromise(data.trim());
+    });
+    process.stdin.on("error", () => {
+      resolvePromise("");
+    });
+  });
+}
 
 const program = new Command();
 
@@ -13,15 +33,26 @@ program
   .description("Terminal-first autonomous AI coding and security agent for the Wide ecosystem")
   .version("0.1.0")
   .argument("[prompt...]", "Optional one-shot prompt for the agent to execute")
-  .option("-p, --provider <provider>", "LLM provider to use (gemini, ollama, claude, deepseek)")
+  .option("-p, --provider <provider>", "LLM provider to use (gemini, ollama, claude, deepseek, openai)")
   .option("-m, --model <model>", "Model name to use")
   .option("-y, --yes", "Auto-approve all file edits and command executions")
   .action(async (promptParts, options) => {
-    const userPrompt = Array.isArray(promptParts) ? promptParts.join(" ").trim() : "";
+    const pipedData = await readStdin();
+    const argPrompt = Array.isArray(promptParts) ? promptParts.join(" ").trim() : "";
+    let userPrompt = argPrompt;
+
+    if (pipedData) {
+      userPrompt = userPrompt ? `${userPrompt}\n\n[Piped Input]:\n${pipedData}` : pipedData;
+    }
 
     if (options.yes) {
       configManager.set("autoApproveWrite", true);
       configManager.set("autoApproveRun", true);
+    }
+
+    const ws = loadWorkspaceConfig();
+    if (ws.rules.length > 0) {
+      console.log(pc.dim(`Loaded ${ws.rules.length} workspace rule(s) from .wide/rules`));
     }
 
     if (userPrompt) {

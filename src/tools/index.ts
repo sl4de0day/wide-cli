@@ -3,6 +3,7 @@ import { listDirTool, searchFilesTool } from "./search.js";
 import { runCommandTool } from "./shell.js";
 import { securityScanTool } from "./security.js";
 import { httpRequestTool } from "./http.js";
+import { gitTool } from "./git.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
 
 export const ALL_TOOLS: Record<string, Tool> = {
@@ -14,6 +15,7 @@ export const ALL_TOOLS: Record<string, Tool> = {
   run_command: runCommandTool,
   run_security_scan: securityScanTool,
   send_http_request: httpRequestTool,
+  git_inspection: gitTool,
 };
 
 export async function executeTool(

@@ -12,6 +12,7 @@
     "build": "tsc",
     "dev": "tsc && node dist/index.js",
     "start": "node bin/wide.js",
+    "test": "node tests/suite.test.mjs",
     "lint": "tsc --noEmit"
   },
   "keywords": [
