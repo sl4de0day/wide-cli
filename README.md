@@ -1,4 +1,5 @@
 <p align="center">
+  <img src="assets/logo.png" alt="Wide CLI" width="128">
   <h1 align="center">Wide CLI</h1>
   <p align="center">Terminal-first autonomous AI coding & security agent for the Wide ecosystem</p>
 </p>
