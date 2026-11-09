@@ -32,7 +32,7 @@ const program = new Command();
 program
   .name("wide")
   .description("Terminal-first autonomous AI coding and security agent for the Wide ecosystem")
-  .version("0.1.0")
+  .version("0.191126")
   .argument("[prompt...]", "Optional one-shot prompt for the agent to execute")
   .option("-p, --provider <provider>", "LLM provider to use (gemini, ollama, claude, deepseek, openai)")
   .option("-m, --model <model>", "Model name to use")
