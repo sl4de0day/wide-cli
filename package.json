@@ -1,0 +1,51 @@
+{
+  "name": "wide-cli",
+  "version": "0.1.0",
+  "description": "Terminal-first autonomous AI coding & security agent for the Wide ecosystem",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "wide": "bin/wide.js"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc && node dist/index.js",
+    "start": "node bin/wide.js",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [
+    "wide",
+    "wide-cli",
+    "ai-agent",
+    "devsecops",
+    "appsec",
+    "terminal",
+    "cli",
+    "security-scanner"
+  ],
+  "author": "sl4de <sl4de0day@github>",
+  "license": "GPL-3.0-or-later",
+  "homepage": "https://github.com/sl4de0day/wide-cli",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sl4de0day/wide-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sl4de0day/wide-cli/issues"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "diff": "^7.0.0",
+    "fast-glob": "^3.3.3",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/diff": "^7.0.2",
+    "@types/node": "^22.13.0",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
