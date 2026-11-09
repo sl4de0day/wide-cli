@@ -72,7 +72,7 @@ wide config set provider gemini
 wide config set-key gemini YOUR_GEMINI_API_KEY
 
 wide config set provider ollama
-wide config set model deepseek-r1:7b
+wide config set model deepseek
 ```
 
 ## License
