@@ -4,6 +4,7 @@ import { createProvider, type ChatMessage, type LLMProvider } from "../providers
 import { executeTool, getToolDefinitions } from "../tools/index.js";
 import { Spinner } from "../ui/spinner.js";
 import { ContextManager } from "./context.js";
+import { CommitmentGate } from "../decision/index.js";
 
 const SYSTEM_PROMPT = `You are Wide CLI, a security-first autonomous AI coding and web penetration testing agent.
 You operate directly in the user's terminal workspace.
@@ -55,6 +56,8 @@ export class Agent {
 
     const tools = getToolDefinitions();
     const spinner = new Spinner("Wide thinking...");
+    const gate = new CommitmentGate(32, 0.0);
+    const callCounts = new Map<string, number>();
     let iteration = 0;
     let finalAssistantText = "";
 
@@ -102,6 +105,22 @@ export class Agent {
 
       for (const tc of response.toolCalls) {
         console.log(`\n${pc.cyan("[TOOL]")} ${pc.bold(tc.name)} ${pc.dim(JSON.stringify(tc.arguments))}`);
+
+        const sig = `${tc.name}:${JSON.stringify(tc.arguments)}`;
+        const count = (callCounts.get(sig) || 0) + 1;
+        callCounts.set(sig, count);
+
+        if (count > 3) {
+          spinner.fail(`${tc.name} suppressed by DecisionCore CommitmentGate (repeated call threshold exceeded)`);
+          this.messages.push({
+            role: "tool",
+            name: tc.name,
+            toolCallId: tc.id,
+            content: "ERROR: DecisionCore CommitmentGate suppressed duplicate tool execution. Please synthesize your findings and answer or select an alternative tool."
+          });
+          continue;
+        }
+
         spinner.start(`Executing ${tc.name}...`);
 
         const result = await executeTool(tc.name, tc.arguments, {

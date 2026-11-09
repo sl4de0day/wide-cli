@@ -3,6 +3,7 @@ import { resolve, relative, extname } from "node:path";
 import fg from "fast-glob";
 import pc from "picocolors";
 import { SECURITY_RULES, type SecurityRule } from "./rules.js";
+import { RuleLoader } from "./loader.js";
 
 export interface Finding {
   id: string;
@@ -48,9 +49,11 @@ const EXTENSION_MAP: Record<string, string> = {
 
 export class SecurityScanner {
   private workspaceDir: string;
+  private rulesPath?: string;
 
-  constructor(workspaceDir = process.cwd()) {
+  constructor(workspaceDir = process.cwd(), rulesPath?: string) {
     this.workspaceDir = workspaceDir;
+    this.rulesPath = rulesPath;
   }
 
   public async scanPath(targetPath = ".", minSeverity: Finding["severity"] | "ALL" = "ALL"): Promise<ScanResult> {
@@ -58,6 +61,8 @@ export class SecurityScanner {
     if (!existsSync(fullTarget)) {
       throw new Error(`Target path does not exist: ${targetPath}`);
     }
+
+    const activeRules = RuleLoader.loadRules(this.rulesPath, this.workspaceDir);
 
     const files = await fg(["**/*.{js,jsx,mjs,cjs,ts,tsx,py,php,java,cs,go,rb,rs,c,cpp,h}"], {
       cwd: fullTarget,
@@ -97,7 +102,7 @@ export class SecurityScanner {
       }
 
       const lines = content.split("\n");
-      const applicableRules = SECURITY_RULES.filter(r => 
+      const applicableRules = activeRules.filter(r => 
         r.languages.includes("all") || r.languages.includes(lang)
       );
 

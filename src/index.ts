@@ -7,6 +7,7 @@ import { createProvider } from "./providers/index.js";
 import { startRepl } from "./repl/index.js";
 import { executeTool } from "./tools/index.js";
 import { getAllPayloadTypes } from "./security/payloads.js";
+import { RuleLoader } from "./security/loader.js";
 
 async function readStdin(): Promise<string> {
   if (process.stdin.isTTY) {
@@ -32,7 +33,7 @@ const program = new Command();
 program
   .name("wide")
   .description("Terminal-first autonomous AI coding and security agent for the Wide ecosystem")
-  .version("0.191126")
+  .version("0.291126")
   .argument("[prompt...]", "Optional one-shot prompt for the agent to execute")
   .option("-p, --provider <provider>", "LLM provider to use (gemini, ollama, claude, deepseek, openai)")
   .option("-m, --model <model>", "Model name to use")
@@ -74,9 +75,35 @@ program
   .command("scan [path]")
   .description("Run Wide native SAST security engine across 20+ vulnerability categories")
   .option("-s, --severity <level>", "Minimum severity (CRITICAL, HIGH, MEDIUM, LOW, ALL)", "ALL")
+  .option("-r, --rules <path>", "Path to custom rules.json file")
   .action(async (targetPath = ".", opts) => {
-    const res = await executeTool("run_security_scan", { path: targetPath, severityFilter: opts.severity }, { workingDirectory: process.cwd() });
+    const res = await executeTool("run_security_scan", { path: targetPath, severityFilter: opts.severity, rulesPath: opts.rules }, { workingDirectory: process.cwd() });
     console.log(res.output);
+  });
+
+const rulesCmd = program
+  .command("rules")
+  .description("Manage and synchronize Wide security rules");
+
+rulesCmd
+  .command("update")
+  .description("Download latest security rules from wide-rules database")
+  .action(async () => {
+    try {
+      console.log(pc.cyan("Downloading latest rules from wide-rules repository..."));
+      const result = await RuleLoader.updateRules();
+      console.log(pc.green(`Successfully synchronized ${result.count} rules to ${result.path}`));
+    } catch (err: any) {
+      console.error(pc.red(`Failed to update rules: ${err.message}`));
+      process.exit(1);
+    }
+  });
+
+rulesCmd
+  .command("path")
+  .description("Show local rules cache path")
+  .action(() => {
+    console.log(RuleLoader.getCachePath());
   });
 
 program

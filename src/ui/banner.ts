@@ -1,6 +1,6 @@
 import pc from "picocolors";
 
-export function printBanner(version = "0.191126") {
+export function printBanner(version = "0.291126") {
   const logo = `
   ██╗    ██╗██╗██████╗ ███████╗     ██████╗██╗     ██╗
   ██║    ██║██║██╔══██╗██╔════╝    ██╔════╝██║     ██║

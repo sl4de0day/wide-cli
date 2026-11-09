@@ -49,6 +49,8 @@ async function runTests() {
   assert.strictEqual(configManager.get().provider, "gemini");
   console.log("[PASS] configuration manager");
 
+  await import("./decision.test.mjs");
+
   console.log("\nAll 7 test suites passed successfully.");
 }
 

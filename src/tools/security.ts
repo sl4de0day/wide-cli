@@ -11,6 +11,7 @@ export const securityScanTool: Tool = {
       type: "object",
       properties: {
         path: { type: "string", description: "Target subdirectory or file to scan (default: entire workspace '.')." },
+        rulesPath: { type: "string", description: "Optional path to custom rules.json file." },
         severityFilter: {
           type: "string",
           description: "Minimum severity to report: 'ALL', 'MEDIUM', 'HIGH', or 'CRITICAL'.",
@@ -22,7 +23,7 @@ export const securityScanTool: Tool = {
   },
   async execute(params, context): Promise<ToolResult> {
     try {
-      const scanner = new SecurityScanner(context.workingDirectory);
+      const scanner = new SecurityScanner(context.workingDirectory, params.rulesPath);
       const filter = (params.severityFilter || "ALL") as Finding["severity"] | "ALL";
       const result = await scanner.scanPath(params.path || ".", filter);
       const report = scanner.formatCliReport(result);
