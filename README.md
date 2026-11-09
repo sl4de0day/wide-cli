@@ -5,8 +5,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/sl4de0day/wide-cli/releases">Releases</a> ·
+  <a href="https://github.com/sl4de0day/wide-cli/releases/latest">Download</a> ·
+  <a href="#building-from-source">Build</a> ·
+  <a href="https://github.com/sl4de0day/wide-cli/releases">Changelog</a> ·
   <a href="https://github.com/sl4de0day/wide-ide">Wide IDE</a> ·
+  <a href="https://github.com/sl4de0day/wide-app">Wide App</a> ·
   <a href="https://github.com/sl4de0day/wide-sdk">Wide SDK</a> ·
   <a href="LICENSE">License</a>
 </p>
@@ -28,6 +31,17 @@ Wide CLI brings the power of Wide's autonomous AI coding and web security agents
 ```bash
 npm install -g wide-cli
 wide
+```
+
+## Building from Source
+
+```bash
+git clone https://github.com/sl4de0day/wide-cli.git
+cd wide-cli
+npm install
+npm run build
+npm test
+npm link
 ```
 
 ## Quick Start
