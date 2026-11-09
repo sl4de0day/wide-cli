@@ -1,7 +1,7 @@
 import { readFileTool, writeFileTool, editFileTool } from "./fs.js";
 import { listDirTool, searchFilesTool } from "./search.js";
 import { runCommandTool } from "./shell.js";
-import { securityScanTool } from "./security.js";
+import { securityScanTool, fuzzEndpointTool, generatePayloadsTool } from "./security.js";
 import { httpRequestTool } from "./http.js";
 import { gitTool } from "./git.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
@@ -14,6 +14,8 @@ export const ALL_TOOLS: Record<string, Tool> = {
   search_files: searchFilesTool,
   run_command: runCommandTool,
   run_security_scan: securityScanTool,
+  fuzz_endpoint: fuzzEndpointTool,
+  generate_payloads: generatePayloadsTool,
   send_http_request: httpRequestTool,
   git_inspection: gitTool,
 };

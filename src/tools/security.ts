@@ -1,67 +1,7 @@
-import { readFileSync } from "node:fs";
-import { resolve, relative } from "node:path";
-import fg from "fast-glob";
-import pc from "picocolors";
+import { SecurityScanner, type Finding } from "../security/scanner.js";
+import { fuzzTargetEndpoint } from "../security/fuzzer.js";
+import { getPayloadsForType, getAllPayloadTypes } from "../security/payloads.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
-
-interface Finding {
-  file: string;
-  line: number;
-  severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
-  category: string;
-  message: string;
-  snippet: string;
-}
-
-const SEC_RULES: {
-  category: string;
-  severity: Finding["severity"];
-  pattern: RegExp;
-  message: string;
-}[] = [
-  {
-    category: "SQL Injection",
-    severity: "CRITICAL",
-    pattern: /(?:SELECT|INSERT|UPDATE|DELETE).*?\+\s*(?:req\.|params\.|body\.|query\.|input|\$)/i,
-    message: "Possible SQL string concatenation with untrusted input."
-  },
-  {
-    category: "Command Injection",
-    severity: "CRITICAL",
-    pattern: /(?:exec|spawn|popen|system)\s*\(\s*(?:`[^`]*\$\{|['"].*?\+\s*)/i,
-    message: "Dynamic command execution with unescaped user string."
-  },
-  {
-    category: "Cross-Site Scripting (XSS)",
-    severity: "HIGH",
-    pattern: /(?:innerHTML|outerHTML|document\.write)\s*=\s*(?:.*?\b(?:query|param|body|req|location|search)\b)/i,
-    message: "Unsanitized user input assigned directly to DOM HTML sink."
-  },
-  {
-    category: "SSRF (Server-Side Request Forgery)",
-    severity: "HIGH",
-    pattern: /(?:fetch|axios\.(?:get|post)|http\.get|request)\s*\(\s*(?:req\.|params\.|query\.|body\.)/i,
-    message: "HTTP request targeting an unvalidated user-controlled URL."
-  },
-  {
-    category: "Hardcoded Secret",
-    severity: "HIGH",
-    pattern: /(?:api_?key|secret|password|token|private_?key)\s*[:=]\s*['"][a-zA-Z0-9_\-]{16,}['"]/i,
-    message: "Possible hardcoded authentication secret or API key."
-  },
-  {
-    category: "Path Traversal",
-    severity: "HIGH",
-    pattern: /(?:readFile|createReadStream|open)\s*\(\s*(?:.*?path\.join.*?req\.|.*?\+\s*req\.)/i,
-    message: "File path constructed from untrusted parameter without boundary checks."
-  },
-  {
-    category: "Code Injection (eval)",
-    severity: "CRITICAL",
-    pattern: /\beval\s*\(\s*(?:req\.|params\.|query\.|input|body)/i,
-    message: "Dynamic code execution via eval with user input."
-  }
-];
 
 export const securityScanTool: Tool = {
   definition: {
@@ -82,62 +22,118 @@ export const securityScanTool: Tool = {
   },
   async execute(params, context): Promise<ToolResult> {
     try {
-      const scanDir = resolve(context.workingDirectory, params.path || ".");
-      console.log(`\n${pc.cyan("[SCAN] Wide SAST Engine:")} ${pc.bold(relative(context.workingDirectory, scanDir) || ".")}`);
-
-      const files = await fg(["**/*.{js,ts,jsx,tsx,py,php,go,rb,java,cs}"], {
-        cwd: scanDir,
-        ignore: ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**", "**/vendor/**"],
-        onlyFiles: true
-      });
-
-      const findings: Finding[] = [];
-
-      for (const file of files) {
-        const full = resolve(scanDir, file);
-        try {
-          const content = readFileSync(full, "utf8");
-          const lines = content.split("\n");
-
-          for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-            for (const rule of SEC_RULES) {
-              if (rule.pattern.test(line)) {
-                findings.push({
-                  file: relative(context.workingDirectory, full),
-                  line: i + 1,
-                  severity: rule.severity,
-                  category: rule.category,
-                  message: rule.message,
-                  snippet: line.trim()
-                });
-              }
-            }
-          }
-        } catch {
-        }
-      }
-
-      if (findings.length === 0) {
-        return {
-          success: true,
-          output: `Wide Security Scan complete: 0 vulnerabilities found in ${files.length} files scanned.`
-        };
-      }
-
-      const formatted = findings.map(f => {
-        const sevColor = f.severity === "CRITICAL" ? pc.red(pc.bold(f.severity)) :
-                         f.severity === "HIGH" ? pc.red(f.severity) :
-                         pc.yellow(f.severity);
-        return `[${sevColor}] ${f.category} in ${pc.bold(`${f.file}:${f.line}`)}\n  Issue: ${f.message}\n  Code: ${pc.dim(f.snippet)}`;
-      }).join("\n\n");
+      const scanner = new SecurityScanner(context.workingDirectory);
+      const filter = (params.severityFilter || "ALL") as Finding["severity"] | "ALL";
+      const result = await scanner.scanPath(params.path || ".", filter);
+      const report = scanner.formatCliReport(result);
 
       return {
         success: true,
-        output: `Wide Security Scan found ${findings.length} issue(s) across ${files.length} scanned files:\n\n${formatted}`
+        output: report
       };
     } catch (err: any) {
-      return { success: false, output: "", error: err.message };
+      return {
+        success: false,
+        output: "",
+        error: `Security scan failed: ${err.message}`
+      };
     }
+  }
+};
+
+export const fuzzEndpointTool: Tool = {
+  definition: {
+    name: "fuzz_endpoint",
+    description: "Actively probe a web API endpoint parameter with security payloads to detect or verify vulnerabilities.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Target endpoint URL." },
+        param: { type: "string", description: "Query or body parameter to fuzz." },
+        payloadType: {
+          type: "string",
+          description: "Category of payloads to inject.",
+          enum: ["sqli", "xss", "ssrf", "traversal", "cmd", "ssti"]
+        },
+        method: {
+          type: "string",
+          description: "HTTP method: 'GET' or 'POST' (default: 'GET').",
+          enum: ["GET", "POST"]
+        }
+      },
+      required: ["url", "param", "payloadType"]
+    }
+  },
+  async execute(params, context): Promise<ToolResult> {
+    try {
+      const report = await fuzzTargetEndpoint(
+        params.url,
+        params.param,
+        params.payloadType,
+        params.method || "GET"
+      );
+
+      const lines: string[] = [
+        `Fuzzing Target: ${report.url}`,
+        `Tested Parameter: ${report.param}`,
+        `Payload Type: ${report.payloadType.toUpperCase()}`,
+        `Baseline HTTP: ${report.baselineStatus} (${report.baselineLength} bytes)`,
+        `Verdict: ${report.isVulnerable ? "[VULNERABLE]" : "[SAFE / NO ANOMALY]"}`,
+        `Summary: ${report.summary}\n`
+      ];
+
+      if (report.findings.length > 0) {
+        lines.push("Confirmed Findings:");
+        for (const f of report.findings) {
+          lines.push(`  Payload:   ${f.payload}`);
+          lines.push(`  Status:    ${f.statusCode}`);
+          lines.push(`  Indicator: ${f.indicator}\n`);
+        }
+      }
+
+      return {
+        success: true,
+        output: lines.join("\n")
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        output: "",
+        error: `Fuzzing failed: ${err.message}`
+      };
+    }
+  }
+};
+
+export const generatePayloadsTool: Tool = {
+  definition: {
+    name: "generate_payloads",
+    description: "Generate targeted security test vectors and injection strings for penetration testing.",
+    parameters: {
+      type: "object",
+      properties: {
+        type: {
+          type: "string",
+          description: "Payload category: 'sqli', 'xss', 'ssrf', 'traversal', 'cmd', or 'ssti'.",
+          enum: ["sqli", "xss", "ssrf", "traversal", "cmd", "ssti"]
+        }
+      },
+      required: ["type"]
+    }
+  },
+  async execute(params, context): Promise<ToolResult> {
+    const list = getPayloadsForType(params.type);
+    if (list.length === 0) {
+      return {
+        success: false,
+        output: "",
+        error: `Unknown category '${params.type}'. Available: ${getAllPayloadTypes().join(", ")}`
+      };
+    }
+
+    return {
+      success: true,
+      output: `Wide Security Payloads (${params.type.toUpperCase()}):\n\n${list.map((p, i) => `${i + 1}. ${p}`).join("\n")}`
+    };
   }
 };

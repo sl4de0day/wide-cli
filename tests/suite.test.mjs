@@ -3,6 +3,7 @@ import { executeTool } from "../dist/tools/index.js";
 import { configManager } from "../dist/config/index.js";
 import { ContextManager } from "../dist/agent/context.js";
 import { formatUnifiedDiff } from "../dist/ui/diff.js";
+import { getPayloadsForType, getAllPayloadTypes } from "../dist/security/payloads.js";
 
 async function runTests() {
   console.log("Running Wide CLI test suite...");
@@ -18,7 +19,20 @@ async function runTests() {
 
   const scanRes = await executeTool("run_security_scan", { path: "." }, { workingDirectory: process.cwd() });
   assert.strictEqual(scanRes.success, true);
-  console.log("[PASS] native SAST scanner");
+  console.log("[PASS] native comprehensive SAST scanner");
+
+  const payloadTypes = getAllPayloadTypes();
+  assert.ok(payloadTypes.includes("sqli"));
+  assert.ok(payloadTypes.includes("xss"));
+  assert.ok(payloadTypes.includes("ssrf"));
+  const sqliPayloads = getPayloadsForType("sqli");
+  assert.ok(sqliPayloads.length > 0);
+  console.log("[PASS] security payloads library");
+
+  const payloadToolRes = await executeTool("generate_payloads", { type: "xss" }, { workingDirectory: process.cwd() });
+  assert.strictEqual(payloadToolRes.success, true);
+  assert.ok(payloadToolRes.output.includes("XSS"));
+  console.log("[PASS] payload generator tool");
 
   const ctxMgr = new ContextManager(100);
   const msgs = [
@@ -35,7 +49,7 @@ async function runTests() {
   assert.strictEqual(configManager.get().provider, "gemini");
   console.log("[PASS] configuration manager");
 
-  console.log("\nAll 5 test suites passed successfully.");
+  console.log("\nAll 7 test suites passed successfully.");
 }
 
 runTests().catch(err => {

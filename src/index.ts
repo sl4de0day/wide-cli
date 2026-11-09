@@ -6,6 +6,7 @@ import { loadWorkspaceConfig } from "./config/workspace.js";
 import { createProvider } from "./providers/index.js";
 import { startRepl } from "./repl/index.js";
 import { executeTool } from "./tools/index.js";
+import { getAllPayloadTypes } from "./security/payloads.js";
 
 async function readStdin(): Promise<string> {
   if (process.stdin.isTTY) {
@@ -71,9 +72,27 @@ program
 
 program
   .command("scan [path]")
-  .description("Run Wide native SAST security engine on the current workspace or target directory")
-  .action(async (targetPath = ".") => {
-    const res = await executeTool("run_security_scan", { path: targetPath }, { workingDirectory: process.cwd() });
+  .description("Run Wide native SAST security engine across 20+ vulnerability categories")
+  .option("-s, --severity <level>", "Minimum severity (CRITICAL, HIGH, MEDIUM, LOW, ALL)", "ALL")
+  .action(async (targetPath = ".", opts) => {
+    const res = await executeTool("run_security_scan", { path: targetPath, severityFilter: opts.severity }, { workingDirectory: process.cwd() });
+    console.log(res.output);
+  });
+
+program
+  .command("payloads <type>")
+  .description(`Output targeted security injection payloads (${getAllPayloadTypes().join(", ")})`)
+  .action(async (type) => {
+    const res = await executeTool("generate_payloads", { type }, { workingDirectory: process.cwd() });
+    console.log(res.output);
+  });
+
+program
+  .command("fuzz <url> <param> <type>")
+  .description("Actively probe an endpoint parameter with injection vectors")
+  .option("-X, --method <method>", "HTTP method (GET, POST)", "GET")
+  .action(async (url, param, type, opts) => {
+    const res = await executeTool("fuzz_endpoint", { url, param, payloadType: type, method: opts.method }, { workingDirectory: process.cwd() });
     console.log(res.output);
   });
 
