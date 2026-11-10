@@ -4,6 +4,14 @@ import { runCommandTool } from "./shell.js";
 import { securityScanTool, fuzzEndpointTool, generatePayloadsTool } from "./security.js";
 import { httpRequestTool } from "./http.js";
 import { gitTool } from "./git.js";
+import {
+  browserNavigateTool,
+  browserClickTool,
+  browserTypeTool,
+  browserExtractTool,
+  browserScreenshotTool,
+  browserCloseTool
+} from "./browser.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
 
 export const ALL_TOOLS: Record<string, Tool> = {
@@ -18,6 +26,12 @@ export const ALL_TOOLS: Record<string, Tool> = {
   generate_payloads: generatePayloadsTool,
   send_http_request: httpRequestTool,
   git_inspection: gitTool,
+  browser_navigate: browserNavigateTool,
+  browser_click: browserClickTool,
+  browser_type: browserTypeTool,
+  browser_extract: browserExtractTool,
+  browser_screenshot: browserScreenshotTool,
+  browser_close: browserCloseTool,
 };
 
 export async function executeTool(

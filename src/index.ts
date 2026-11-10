@@ -33,7 +33,7 @@ const program = new Command();
 program
   .name("wide")
   .description("Terminal-first autonomous AI coding and security agent for the Wide ecosystem")
-  .version("0.291126")
+  .version("0.3101126")
   .argument("[prompt...]", "Optional one-shot prompt for the agent to execute")
   .option("-p, --provider <provider>", "LLM provider to use (gemini, ollama, claude, deepseek, openai)")
   .option("-m, --model <model>", "Model name to use")
@@ -104,6 +104,19 @@ rulesCmd
   .description("Show local rules cache path")
   .action(() => {
     console.log(RuleLoader.getCachePath());
+  });
+
+rulesCmd
+  .command("agent")
+  .description("List active AI agent security rules")
+  .option("-r, --rules <path>", "Path to custom agent rules JSON file")
+  .action((opts) => {
+    const rules = RuleLoader.loadAgentRules(opts.rules);
+    const info = RuleLoader.getAgentRulesPath();
+    console.log(pc.bold(`Active AI Agent Security Rules (${rules.length}) [source: ${info.active}]:`));
+    for (const r of rules) {
+      console.log(`  ${pc.cyan(r.id)} [${pc.yellow(r.severity)}] (${r.cwe}) - ${r.message}`);
+    }
   });
 
 program

@@ -1,6 +1,6 @@
 {
   "name": "wide-cli",
-  "version": "0.291126",
+  "version": "0.3101126",
   "description": "Terminal-first autonomous AI coding & security agent for the Wide ecosystem",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

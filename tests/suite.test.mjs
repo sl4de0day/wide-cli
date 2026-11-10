@@ -50,8 +50,9 @@ async function runTests() {
   console.log("[PASS] configuration manager");
 
   await import("./decision.test.mjs");
+  await import("./browser.test.mjs");
 
-  console.log("\nAll 7 test suites passed successfully.");
+  console.log("\nAll 8 test suites passed successfully.");
 }
 
 runTests().catch(err => {

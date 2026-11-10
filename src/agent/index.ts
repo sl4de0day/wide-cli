@@ -5,6 +5,8 @@ import { executeTool, getToolDefinitions } from "../tools/index.js";
 import { Spinner } from "../ui/spinner.js";
 import { ContextManager } from "./context.js";
 import { CommitmentGate } from "../decision/index.js";
+import { RuleLoader } from "../security/loader.js";
+import { type SecurityRule } from "../security/rules.js";
 
 const SYSTEM_PROMPT = `You are Wide CLI, a security-first autonomous AI coding and web penetration testing agent.
 You operate directly in the user's terminal workspace.
@@ -16,6 +18,7 @@ Your capabilities:
 - Send HTTP requests (send_http_request) to test web endpoints, probe API security, or verify fixes.
 - Fuzz web endpoints (fuzz_endpoint) with automated injection vectors to verify live vulnerabilities.
 - Generate targeted offensive security payloads (generate_payloads) for penetration testing and verification.
+- Autonomously navigate, interact with, click, fill forms, and extract content in a background headless browser using browser tools (browser_navigate, browser_click, browser_type, browser_extract, browser_screenshot, browser_close).
 - Keep your answers concise, practical, and action-oriented. Do not produce boilerplate pleasantries.
 - Always inspect relevant files before modifying them.
 - When fixing security vulnerabilities, provide clean, secure, production-grade solutions.`;
@@ -25,15 +28,26 @@ export class Agent {
   private provider: LLMProvider;
   private workingDirectory: string;
   private contextManager: ContextManager;
+  private agentRules: SecurityRule[] = [];
 
   constructor(workingDirectory = process.cwd(), provider?: LLMProvider) {
     this.workingDirectory = workingDirectory;
     this.provider = provider || createProvider();
     this.contextManager = new ContextManager();
+    this.agentRules = RuleLoader.loadAgentRules(undefined, workingDirectory);
     this.messages.push({
       role: "system",
       content: SYSTEM_PROMPT
     });
+  }
+
+  public getAgentRules(): SecurityRule[] {
+    return this.agentRules;
+  }
+
+  public reloadAgentRules(): SecurityRule[] {
+    this.agentRules = RuleLoader.loadAgentRules(undefined, this.workingDirectory);
+    return this.agentRules;
   }
 
   public setProvider(provider: LLMProvider): void {
