@@ -8,7 +8,7 @@ import { CommitmentGate } from "../decision/index.js";
 import { RuleLoader } from "../security/loader.js";
 import { type SecurityRule } from "../security/rules.js";
 
-const SYSTEM_PROMPT = `You are Wide CLI, a security-first autonomous AI coding and web penetration testing agent.
+const BASE_SYSTEM_PROMPT = `You are Wide CLI, a security-first autonomous AI coding and web penetration testing agent.
 You operate directly in the user's terminal workspace.
 
 Your capabilities:
@@ -20,9 +20,13 @@ Your capabilities:
 - Generate targeted offensive security payloads (generate_payloads) for penetration testing and verification.
 - Autonomously navigate, interact with, click, fill forms, and extract content in a background headless browser using browser tools (browser_navigate, browser_click, browser_type, browser_extract, browser_screenshot, browser_close).
 - Keep your answers concise, practical, and action-oriented. Do not produce boilerplate pleasantries.
-- Do not use emojis anywhere in your responses or generated code. Never output emojis under any circumstances.
-- Always inspect relevant files before modifying them.
 - When fixing security vulnerabilities, provide clean, secure, production-grade solutions.`;
+
+export function buildAgentSystemPrompt(rules?: SecurityRule[]): string {
+  const instructions = RuleLoader.buildAgentInstructions(rules);
+  if (!instructions) return BASE_SYSTEM_PROMPT;
+  return `${BASE_SYSTEM_PROMPT}\n\nEcosystem Agent Guardrails (wide-rules):\n${instructions}`;
+}
 
 export class Agent {
   private messages: ChatMessage[] = [];
@@ -38,7 +42,7 @@ export class Agent {
     this.agentRules = RuleLoader.loadAgentRules(undefined, workingDirectory);
     this.messages.push({
       role: "system",
-      content: SYSTEM_PROMPT
+      content: buildAgentSystemPrompt(this.agentRules)
     });
   }
 
@@ -48,6 +52,9 @@ export class Agent {
 
   public reloadAgentRules(): SecurityRule[] {
     this.agentRules = RuleLoader.loadAgentRules(undefined, this.workingDirectory);
+    if (this.messages.length > 0 && this.messages[0].role === "system") {
+      this.messages[0].content = buildAgentSystemPrompt(this.agentRules);
+    }
     return this.agentRules;
   }
 
@@ -58,7 +65,7 @@ export class Agent {
   public clearHistory(): void {
     this.messages = [{
       role: "system",
-      content: SYSTEM_PROMPT
+      content: buildAgentSystemPrompt(this.agentRules)
     }];
   }
 
@@ -90,7 +97,7 @@ export class Agent {
           this.messages,
           tools,
           (chunk) => {
-            const clean = chunk.replace(/\p{Extended_Pictographic}/gu, "");
+            const clean = RuleLoader.sanitizeOutput(chunk, this.agentRules);
             if (!clean) return;
             if (!streamedText) {
               spinner.stop(true);
@@ -108,7 +115,7 @@ export class Agent {
         process.stdout.write("\n");
       }
 
-      finalAssistantText = (response.content || "").replace(/\p{Extended_Pictographic}/gu, "");
+      finalAssistantText = RuleLoader.sanitizeOutput(response.content || "", this.agentRules);
 
       this.messages.push({
         role: "assistant",

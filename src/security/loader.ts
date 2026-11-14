@@ -21,6 +21,10 @@ export class RuleLoader {
     if (existsSync(wsRulesPath)) {
       return { active: wsRulesPath, workspace: wsRulesPath, cache: DEFAULT_CACHE_FILE };
     }
+    const siblingWideRules = resolve(workspaceDir, "../wide-rules/dist/rules.json");
+    if (existsSync(siblingWideRules)) {
+      return { active: siblingWideRules, workspace: null, cache: DEFAULT_CACHE_FILE };
+    }
     if (existsSync(DEFAULT_CACHE_FILE)) {
       return { active: DEFAULT_CACHE_FILE, workspace: null, cache: DEFAULT_CACHE_FILE };
     }
@@ -40,6 +44,12 @@ export class RuleLoader {
     if (existsSync(workspaceRulesPath)) {
       const wsRules = this.parseRulesFile(workspaceRulesPath);
       if (wsRules.length > 0) return wsRules;
+    }
+
+    const siblingWideRules = resolve(workspaceDir, "../wide-rules/dist/rules.json");
+    if (existsSync(siblingWideRules)) {
+      const siblingRules = this.parseRulesFile(siblingWideRules);
+      if (siblingRules.length > 0) return siblingRules;
     }
 
     if (existsSync(DEFAULT_CACHE_FILE)) {
@@ -74,6 +84,13 @@ export class RuleLoader {
       if (filtered.length > 0) return filtered;
     }
 
+    const siblingWideRules = resolve(workspaceDir, "../wide-rules/dist/rules.json");
+    if (existsSync(siblingWideRules)) {
+      const siblingRules = this.parseRulesFile(siblingWideRules);
+      const filtered = siblingRules.filter(r => r.category === "AI_SECURITY" || r.id.includes("ai-"));
+      if (filtered.length > 0) return filtered;
+    }
+
     if (existsSync(DEFAULT_CACHE_FILE)) {
       const cached = this.parseRulesFile(DEFAULT_CACHE_FILE);
       const filtered = cached.filter(r => r.category === "AI_SECURITY" || r.id.includes("ai-"));
@@ -81,6 +98,31 @@ export class RuleLoader {
     }
 
     return [...DEFAULT_AGENT_RULES];
+  }
+
+  public static buildAgentInstructions(rules?: SecurityRule[]): string {
+    const targetRules = Array.isArray(rules) && rules.length > 0 ? rules : this.loadAgentRules();
+    const lines: string[] = [];
+    for (const r of targetRules) {
+      const text = (r.instruction || r.message || "").trim();
+      if (text) {
+        lines.push(`- ${text}`);
+      }
+    }
+    return lines.join("\n");
+  }
+
+  public static sanitizeOutput(text: string, rules?: SecurityRule[]): string {
+    if (!text || typeof text !== "string") return "";
+    const targetRules = Array.isArray(rules) && rules.length > 0 ? rules : this.loadAgentRules();
+    let result = text;
+    for (const r of targetRules) {
+      if (r.id === "wide/ai-no-emojis" || r.id.includes("emoji")) {
+        result = result.replace(/(?:[\uD800-\uDBFF][\uDC00-\uDFFF]|[\u2600-\u27BF])/g, "");
+        result = result.replace(/\p{Extended_Pictographic}/gu, "");
+      }
+    }
+    return result;
   }
 
   public static async updateRules(): Promise<{ count: number; path: string }> {
@@ -114,7 +156,8 @@ export class RuleLoader {
             pattern: new RegExp(item.pattern, "i"),
             sourcePattern: item["source-pattern"] ? new RegExp(item["source-pattern"], "i") : undefined,
             message: item.message || "",
-            remediation: item.remediation || ""
+            remediation: item.remediation || "",
+            instruction: item.instruction || item.message || ""
           };
           result.push(rule);
         } catch {

@@ -11,10 +11,18 @@ assert.ok(cachePath.includes("rules.json"));
 
 const agentRules = RuleLoader.loadAgentRules();
 assert.ok(Array.isArray(agentRules));
-assert.strictEqual(agentRules.length, 8);
+assert.ok(agentRules.length >= 8);
+assert.ok(agentRules.some(r => r.id === "wide/ai-no-emojis"));
 assert.ok(agentRules.some(r => r.id === "wide/cwe078-ai-unsafe-tool-exec"));
 assert.ok(agentRules.some(r => r.id === "wide/cwe079-ai-prompt-injection"));
 assert.ok(agentRules.some(r => r.id === "wide/cwe400-ai-unbounded-agent-loop"));
+
+const instructions = RuleLoader.buildAgentInstructions(agentRules);
+assert.ok(typeof instructions === "string");
+assert.ok(instructions.includes("Do not use emojis"));
+
+const sanitized = RuleLoader.sanitizeOutput("Hello 😀 World", agentRules);
+assert.strictEqual(sanitized, "Hello  World");
 
 const agentPathInfo = RuleLoader.getAgentRulesPath();
 assert.ok(typeof agentPathInfo === "object");
