@@ -225,10 +225,10 @@ export const DEFAULT_AGENT_RULES: SecurityRule[] = [
     category: "AI_SECURITY",
     severity: "HIGH",
     languages: ["all"],
-    pattern: /(?:[\uD800-\uDBFF][\uDC00-\uDFFF]|[\u2600-\u27BF])/,
+    pattern: /(?:[0-9#*]\uFE0F?\u20E3|[\uD800-\uDBFF][\uDC00-\uDFFF]|[\u231A-\u23FF\u2600-\u27BF\u2B05-\u2B55]|[\u2139\u2194-\u21AA\u24C2\u25AA-\u25FE\u2934-\u2935\u3030\u303D\u3297\u3299]\uFE0F)/,
     message: "AI agents must not use emojis or emoticons under any circumstances.",
     remediation: "Strip all emojis from text and outputs, preserving clean technical prose.",
-    instruction: "Do not use emojis anywhere in your responses or generated code. Never output emojis under any circumstances."
+    instruction: "Do not use emojis anywhere in your responses, headings, bullet points, status labels, thoughts, reasoning, tool arguments, comments, or generated code. Never output emojis under any circumstances."
   },
   {
     id: "wide/cwe078-ai-unsafe-tool-exec",

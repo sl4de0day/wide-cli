@@ -24,6 +24,42 @@ function parseChecksums(raw: string): Map<string, string> {
   return out;
 }
 
+const EMOJI_ZWJ_SEQUENCE_RE = /(?:\p{Extended_Pictographic}|\p{Emoji_Presentation}|[\u2600-\u27BF])(?:\uFE0F|\uFE0E|[\u{1F3FB}-\u{1F3FF}])?(?:\u200D(?:\p{Extended_Pictographic}|\p{Emoji_Presentation}|[\u2600-\u27BF])(?:\uFE0F|\uFE0E|[\u{1F3FB}-\u{1F3FF}])?)+/gu;
+const EMOJI_KEYCAP_RE = /[0-9#*]\uFE0F?\u20E3/gu;
+const EMOJI_SUPP_RE = /[\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\u{E0020}-\u{E007F}]/gu;
+const EMOJI_PICT_RE = /\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?/gu;
+const EMOJI_PRES_RE = /\p{Emoji_Presentation}(?:\uFE0F|\uFE0E)?/gu;
+const EMOJI_BMP_RE = /[\u231A-\u23FF\u2600-\u27BF\u2B05-\u2B55][\uFE0E\uFE0F]?|[\u2139\u2194-\u21AA\u24C2\u25AA-\u25FE\u2934-\u2935\u3030\u303D\u3297\u3299]\uFE0F|[\uFE0E\uFE0F\u20E3]/gu;
+const LONE_SURROGATE_RE = new RegExp("[\\uD800-\\uDFFF]", "g");
+const EMOJI_TAIL_RE = /(?:[0-9#*]\uFE0F|[\u2139\u2194-\u21AA\u24C2\u25AA-\u25FE\u2934-\u2935\u3030\u303D\u3297\u3299]|[\uD800-\uDBFF]|[\uFE0E\uFE0F\u200D])$/;
+
+function stripAllEmojis(text: string, stripLoneSurrogates = true): string {
+  let out = text
+    .replace(EMOJI_ZWJ_SEQUENCE_RE, "")
+    .replace(EMOJI_KEYCAP_RE, "")
+    .replace(EMOJI_SUPP_RE, "")
+    .replace(EMOJI_PICT_RE, "")
+    .replace(EMOJI_PRES_RE, "")
+    .replace(EMOJI_BMP_RE, "");
+  if (stripLoneSurrogates) {
+    out = out.replace(LONE_SURROGATE_RE, "");
+  }
+  return out;
+}
+
+function mergeDefaultAgentRules(rules: SecurityRule[]): SecurityRule[] {
+  const merged = [...rules];
+  const seen = new Set(merged.map((r) => r.id));
+  for (const fallback of DEFAULT_AGENT_RULES) {
+    if (!seen.has(fallback.id)) {
+      merged.push(fallback);
+      seen.add(fallback.id);
+    }
+  }
+  merged.sort((a, b) => (a.id === "wide/ai-no-emojis" ? -1 : b.id === "wide/ai-no-emojis" ? 1 : 0));
+  return merged;
+}
+
 export class RuleLoader {
   public static getCachePath(): string {
     return DEFAULT_CACHE_FILE;
@@ -106,26 +142,26 @@ export class RuleLoader {
     if (existsSync(workspaceRulesPath)) {
       const wsRules = this.parseRulesFile(workspaceRulesPath);
       const filtered = wsRules.filter(r => r.category === "AI_SECURITY" || r.id.includes("ai-"));
-      if (filtered.length > 0) return filtered;
+      if (filtered.length > 0) return mergeDefaultAgentRules(filtered);
     }
 
     const siblingWideRules = resolve(workspaceDir, "../wide-rules/dist/rules.json");
     if (existsSync(siblingWideRules)) {
       const siblingRules = this.parseRulesFile(siblingWideRules);
       const filtered = siblingRules.filter(r => r.category === "AI_SECURITY" || r.id.includes("ai-"));
-      if (filtered.length > 0) return filtered;
+      if (filtered.length > 0) return mergeDefaultAgentRules(filtered);
     }
 
     if (existsSync(INSTALL_WIDE_RULES)) {
       const installRules = this.parseRulesFile(INSTALL_WIDE_RULES);
       const filtered = installRules.filter(r => r.category === "AI_SECURITY" || r.id.includes("ai-"));
-      if (filtered.length > 0) return filtered;
+      if (filtered.length > 0) return mergeDefaultAgentRules(filtered);
     }
 
     if (existsSync(DEFAULT_CACHE_FILE)) {
       const cached = this.parseRulesFile(DEFAULT_CACHE_FILE);
       const filtered = cached.filter(r => r.category === "AI_SECURITY" || r.id.includes("ai-"));
-      if (filtered.length > 0) return filtered;
+      if (filtered.length > 0) return mergeDefaultAgentRules(filtered);
     }
 
     return [...DEFAULT_AGENT_RULES];
@@ -143,17 +179,41 @@ export class RuleLoader {
     return lines.join("\n");
   }
 
-  public static sanitizeOutput(text: string, rules?: SecurityRule[]): string {
+  public static sanitizeOutput(text: string, rules?: SecurityRule[], stripLoneSurrogates = true): string {
     if (!text || typeof text !== "string") return "";
     const targetRules = Array.isArray(rules) && rules.length > 0 ? rules : this.loadAgentRules();
-    let result = text;
+    let result = stripAllEmojis(text, stripLoneSurrogates);
     for (const r of targetRules) {
-      if (r.id === "wide/ai-no-emojis" || r.id.includes("emoji")) {
-        result = result.replace(/(?:[\uD800-\uDBFF][\uDC00-\uDFFF]|[\u2600-\u27BF])/g, "");
-        result = result.replace(/\p{Extended_Pictographic}/gu, "");
+      if ((r.id === "wide/ai-no-emojis" || r.id.includes("emoji")) && r.pattern) {
+        try {
+          const src = r.pattern.source;
+          const flags = src.includes("\\uD800") ? "g" : "gu";
+          result = result.replace(new RegExp(src, flags), "");
+        } catch {}
       }
     }
     return result;
+  }
+
+  public static createStreamSanitizer(rules?: SecurityRule[]) {
+    let pending = "";
+    return {
+      push: (chunk: string): string => {
+        const combined = pending + String(chunk ?? "");
+        const match = EMOJI_TAIL_RE.exec(combined);
+        const tailLen = match ? match[0].length : 0;
+        const safeLen = combined.length - tailLen;
+        pending = tailLen > 0 ? combined.slice(safeLen) : "";
+        if (safeLen <= 0) return "";
+        return this.sanitizeOutput(combined.slice(0, safeLen), rules, false);
+      },
+      flush: (): string => {
+        if (!pending) return "";
+        const out = this.sanitizeOutput(pending, rules, true);
+        pending = "";
+        return out;
+      }
+    };
   }
 
   public static loadAdvisories(workspaceDir = process.cwd()): Record<string, any> {
@@ -176,10 +236,13 @@ export class RuleLoader {
   public static async syncIfStale(ttlMs = 24 * 60 * 60 * 1000): Promise<boolean> {
     if (process.env.WIDE_NO_AUTO_RULES_SYNC === "1") return false;
     try {
-      if (existsSync(DEFAULT_META_FILE)) {
+      if (existsSync(DEFAULT_META_FILE) && existsSync(DEFAULT_CACHE_FILE)) {
         const meta = JSON.parse(readFileSync(DEFAULT_META_FILE, "utf8"));
         const age = Date.now() - Date.parse(meta?.syncedAt || "");
-        if (Number.isFinite(age) && age >= 0 && age < ttlMs) return false;
+        if (Number.isFinite(age) && age >= 0 && age < ttlMs) {
+          const cachedRaw = readFileSync(DEFAULT_CACHE_FILE, "utf8");
+          if (cachedRaw.includes("wide/ai-no-emojis")) return false;
+        }
       }
     } catch {}
     await this.updateRules();

@@ -60,6 +60,20 @@ try {
   const loadedWithNotMatch = RuleLoader.loadRules(undefined, tmpWs);
   assert.ok(loadedWithNotMatch.some(r => r.id === "wide/test-not-match" && r.notMatch instanceof RegExp));
 
+  const mergedAgent = RuleLoader.loadAgentRules(undefined, tmpWs);
+  assert.ok(mergedAgent.some(r => r.id === "wide/ai-no-emojis"));
+
+  assert.strictEqual(RuleLoader.sanitizeOutput("Hello 😀⭐ℹ️1️⃣👨‍💻🇷🇺 World", mergedAgent), "Hello  World");
+  const stream = RuleLoader.createStreamSanitizer(mergedAgent);
+  const streamed = [
+    stream.push("Hi \uD83D"),
+    stream.push("\uDE00 1\uFE0F"),
+    stream.push("\u20E3 \u2139"),
+    stream.push("\uFE0F Ok"),
+    stream.flush()
+  ].join("");
+  assert.strictEqual(streamed, "Hi   Ok");
+
   const scanner = new SecurityScanner(tmpWs);
   const scanRes = await scanner.scanPath(".", "ALL");
   const hits = scanRes.findings.filter(f => f.id === "wide/test-not-match");

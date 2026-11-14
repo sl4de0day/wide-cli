@@ -184,13 +184,14 @@ export class Agent {
 
         let streamedText = "";
         let response;
+        const streamSanitizer = RuleLoader.createStreamSanitizer(this.agentRules);
 
         try {
           response = await this.provider.chatStream(
             this.messages,
             tools,
             (chunk) => {
-              const clean = RuleLoader.sanitizeOutput(chunk, this.agentRules);
+              const clean = streamSanitizer.push(chunk);
               if (!clean) return;
               if (!streamedText) {
                 spinner.stop(true);
@@ -200,6 +201,12 @@ export class Agent {
             },
             options.signal
           );
+          const trailing = streamSanitizer.flush();
+          if (trailing) {
+            if (!streamedText) spinner.stop(true);
+            streamedText += trailing;
+            process.stdout.write(trailing);
+          }
         } catch (err: any) {
           spinner.stop(true);
           if (isAbortError(err) || options.signal?.aborted) {
