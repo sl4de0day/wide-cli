@@ -114,6 +114,7 @@ export class SecurityScanner {
           if (severityRanks[rule.severity] < minRank) continue;
 
           if (rule.pattern.test(lineText)) {
+            if (rule.notMatch && rule.notMatch.test(lineText)) continue;
             let confirmed = true;
             if (rule.sourcePattern) {
               const windowStart = Math.max(0, i - 15);

@@ -1,9 +1,13 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createRequire } from "node:module";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
 
 export interface DOMElement {
   index: number;
+  ref?: string;
   tag: string;
   text: string;
   role: string;
@@ -22,6 +26,369 @@ export interface BrowserState {
   rawHtml: string;
   formInputs: Record<string, string>;
   history: string[];
+  mode?: "playwright" | "cdp" | "http";
+  lastScreenshotPath?: string;
+}
+
+export interface BrowserConsoleEntry {
+  level: string;
+  text: string;
+  timestamp: string;
+}
+
+interface CdpPending {
+  resolve: (value: any) => void;
+  reject: (err: Error) => void;
+}
+
+class NativeCdpSession {
+  private proc: ChildProcess | null = null;
+  private profileDir: string | null = null;
+  private ws: any = null;
+  private nextId = 1;
+  private pending = new Map<number, CdpPending>();
+  private eventListeners = new Map<string, Array<(params: any) => void>>();
+  public consoleEntries: BrowserConsoleEntry[] = [];
+  public lastStatusCode = 200;
+
+  public async connect(executablePath: string, proxyUrl?: string): Promise<void> {
+    const WS = (globalThis as any).WebSocket;
+    if (typeof WS !== "function") {
+      throw new Error("Native WebSocket runtime unavailable");
+    }
+
+    this.profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "wide-cli-cdp-"));
+    const args = [
+      "--headless=new",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-gpu",
+      "--disable-extensions",
+      "--disable-background-networking",
+      "--remote-debugging-port=0",
+      `--user-data-dir=${this.profileDir}`
+    ];
+    if (proxyUrl) {
+      args.push(`--proxy-server=${proxyUrl}`);
+    }
+    args.push("about:blank");
+
+    const wsBaseUrl = await new Promise<string>((resolvePromise, rejectPromise) => {
+      let settled = false;
+      let stderrBuf = "";
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          rejectPromise(new Error("Timed out waiting for browser DevTools endpoint"));
+        }
+      }, 15000);
+
+      this.proc = spawn(executablePath, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true
+      });
+
+      this.proc.on("error", (err) => {
+        clearTimeout(timer);
+        if (!settled) {
+          settled = true;
+          rejectPromise(err);
+        }
+      });
+
+      this.proc.on("exit", (code) => {
+        clearTimeout(timer);
+        if (!settled) {
+          settled = true;
+          rejectPromise(new Error(`Browser exited early (${code}): ${stderrBuf.slice(0, 300)}`));
+        }
+      });
+
+      this.proc.stderr?.on("data", (chunk: Buffer) => {
+        stderrBuf += chunk.toString("utf8");
+        const m = /DevTools listening on (ws:\/\/[^\s]+)/i.exec(stderrBuf);
+        if (m && !settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolvePromise(m[1]);
+        }
+      });
+    });
+
+    const parsed = new URL(wsBaseUrl);
+    const httpBase = `http://${parsed.host}`;
+    let pageWsUrl = "";
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        const res = await fetch(`${httpBase}/json/list`);
+        if (res.ok) {
+          const targets = (await res.json()) as any[];
+          const pageTarget = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
+          if (pageTarget?.webSocketDebuggerUrl) {
+            pageWsUrl = pageTarget.webSocketDebuggerUrl;
+            break;
+          }
+        }
+      } catch {
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    if (!pageWsUrl) {
+      const created = await fetch(`${httpBase}/json/new?about:blank`, { method: "PUT" }).catch(() => null);
+      if (created && created.ok) {
+        const t = (await created.json()) as any;
+        pageWsUrl = t?.webSocketDebuggerUrl || "";
+      }
+    }
+
+    if (!pageWsUrl) {
+      await this.dispose();
+      throw new Error("Could not acquire CDP page target");
+    }
+
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      const timer = setTimeout(() => rejectPromise(new Error("CDP WebSocket connect timeout")), 10000);
+      const ws = new WS(pageWsUrl);
+      this.ws = ws;
+      ws.addEventListener("open", () => {
+        clearTimeout(timer);
+        resolvePromise();
+      });
+      ws.addEventListener("error", () => {
+        clearTimeout(timer);
+        rejectPromise(new Error("CDP WebSocket connection failed"));
+      });
+      ws.addEventListener("message", (ev: any) => {
+        this.handleMessage(typeof ev.data === "string" ? ev.data : String(ev.data));
+      });
+      ws.addEventListener("close", () => {
+        for (const [, p] of this.pending) {
+          p.reject(new Error("CDP connection closed"));
+        }
+        this.pending.clear();
+      });
+    });
+
+    await this.send("Page.enable");
+    await this.send("Runtime.enable");
+    await this.send("Network.enable");
+    await this.send("Emulation.setDeviceMetricsOverride", {
+      width: 1280,
+      height: 800,
+      deviceScaleFactor: 1,
+      mobile: false
+    });
+
+    this.on("Runtime.consoleAPICalled", (params) => {
+      const parts = Array.isArray(params?.args)
+        ? params.args.map((a: any) => a?.value ?? a?.description ?? "").filter(Boolean)
+        : [];
+      this.consoleEntries.push({
+        level: String(params?.type || "log"),
+        text: parts.join(" "),
+        timestamp: new Date().toISOString()
+      });
+      if (this.consoleEntries.length > 200) {
+        this.consoleEntries.shift();
+      }
+    });
+
+    this.on("Runtime.exceptionThrown", (params) => {
+      const desc = params?.exceptionDetails?.exception?.description || params?.exceptionDetails?.text || "Runtime exception";
+      this.consoleEntries.push({
+        level: "error",
+        text: String(desc),
+        timestamp: new Date().toISOString()
+      });
+      if (this.consoleEntries.length > 200) {
+        this.consoleEntries.shift();
+      }
+    });
+
+    this.on("Network.responseReceived", (params) => {
+      if (params?.type === "Document" && typeof params?.response?.status === "number") {
+        this.lastStatusCode = params.response.status;
+      }
+    });
+  }
+
+  private handleMessage(raw: string): void {
+    let msg: any;
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (typeof msg.id === "number") {
+      const p = this.pending.get(msg.id);
+      if (p) {
+        this.pending.delete(msg.id);
+        if (msg.error) {
+          p.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+        } else {
+          p.resolve(msg.result);
+        }
+      }
+      return;
+    }
+    if (msg.method) {
+      const list = this.eventListeners.get(msg.method);
+      if (list) {
+        for (const fn of list) {
+          try {
+            fn(msg.params);
+          } catch {
+          }
+        }
+      }
+    }
+  }
+
+  public on(method: string, handler: (params: any) => void): () => void {
+    const arr = this.eventListeners.get(method) || [];
+    arr.push(handler);
+    this.eventListeners.set(method, arr);
+    return () => {
+      const cur = this.eventListeners.get(method) || [];
+      this.eventListeners.set(method, cur.filter((f) => f !== handler));
+    };
+  }
+
+  public send(method: string, params: Record<string, any> = {}, timeoutMs = 15000): Promise<any> {
+    if (!this.ws || this.ws.readyState !== 1) {
+      return Promise.reject(new Error("CDP session is not open"));
+    }
+    const id = this.nextId++;
+    return new Promise((resolvePromise, rejectPromise) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        rejectPromise(new Error(`CDP command timed out: ${method}`));
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (val) => {
+          clearTimeout(timer);
+          resolvePromise(val);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          rejectPromise(err);
+        }
+      });
+      this.ws.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  public async evalValue(expression: string): Promise<any> {
+    const res = await this.send("Runtime.evaluate", {
+      expression,
+      returnByValue: true,
+      awaitPromise: true
+    });
+    if (res?.exceptionDetails) {
+      const msg = res.exceptionDetails.exception?.description || res.exceptionDetails.text || "Evaluation failed";
+      throw new Error(String(msg));
+    }
+    return res?.result?.value;
+  }
+
+  public async dispose(): Promise<void> {
+    try {
+      if (this.ws) {
+        this.ws.close();
+        this.ws = null;
+      }
+    } catch {
+    }
+    if (this.proc) {
+      try {
+        this.proc.kill("SIGKILL");
+      } catch {
+      }
+      this.proc = null;
+    }
+    if (this.profileDir) {
+      try {
+        fs.rmSync(this.profileDir, { recursive: true, force: true });
+      } catch {
+      }
+      this.profileDir = null;
+    }
+  }
+}
+
+const SNAPSHOT_DOM_SCRIPT = `(() => {
+  const prev = document.querySelectorAll('[data-wide-ref]');
+  for (const node of prev) node.removeAttribute('data-wide-ref');
+  const selector = 'a[href], button, input, select, textarea, [role="button"], [role="link"], [role="textbox"], [onclick], [tabindex]:not([tabindex="-1"])';
+  const nodes = Array.from(document.querySelectorAll(selector));
+  const elements = [];
+  let idx = 1;
+  for (const el of nodes) {
+    if (!(el instanceof Element)) continue;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 && rect.height <= 0 && el.tagName.toLowerCase() !== 'input') continue;
+    const tag = el.tagName.toLowerCase();
+    const typeAttr = (el.getAttribute('type') || 'text').toLowerCase();
+    if (tag === 'input' && typeAttr === 'hidden') continue;
+    const ref = '@e' + idx;
+    el.setAttribute('data-wide-ref', ref);
+    const role = tag === 'a' ? 'link' : tag === 'input' ? ('input[' + typeAttr + ']') : (el.getAttribute('role') || tag);
+    const rawText = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+    const aria = el.getAttribute('aria-label') || '';
+    const placeholder = el.getAttribute('placeholder') || '';
+    const name = el.getAttribute('name') || '';
+    const val = ('value' in el && typeof el.value === 'string') ? el.value : (el.getAttribute('value') || '');
+    const href = tag === 'a' ? (el.getAttribute('href') || '') : '';
+    const text = (rawText || aria || placeholder || name || val || role).slice(0, 120);
+    elements.push({
+      index: idx,
+      ref,
+      tag,
+      role,
+      text,
+      href,
+      name,
+      value: val,
+      attributes: {
+        id: el.id || '',
+        name,
+        type: typeAttr,
+        placeholder,
+        href,
+        'aria-label': aria
+      }
+    });
+    idx++;
+    if (idx > 120) break;
+  }
+  const bodyText = (document.body ? (document.body.innerText || document.body.textContent || '') : '')
+    .replace(/\\s+/g, ' ')
+    .trim()
+    .slice(0, 8000);
+  return {
+    url: location.href,
+    title: document.title || location.href,
+    textContent: bodyText,
+    rawHtml: document.documentElement ? document.documentElement.outerHTML.slice(0, 50000) : '',
+    elements
+  };
+})()`;
+
+const activeControllers = new Set<HeadlessBrowserController>();
+let cleanupRegistered = false;
+
+function registerProcessCleanup(): void {
+  if (cleanupRegistered) return;
+  cleanupRegistered = true;
+  process.once("exit", () => {
+    for (const ctrl of activeControllers) {
+      ctrl.forceDisposeSync();
+    }
+  });
 }
 
 export class HeadlessBrowserController {
@@ -33,10 +400,17 @@ export class HeadlessBrowserController {
     textContent: "",
     rawHtml: "",
     formInputs: {},
-    history: []
+    history: [],
+    mode: "http"
   };
 
-  private userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Wide-CLI/0.291126";
+  private cdp: NativeCdpSession | null = null;
+  private pwBrowser: any = null;
+  private pwContext: any = null;
+  private pwPage: any = null;
+  private consoleBuffer: BrowserConsoleEntry[] = [];
+  private cookieJar = new Map<string, string>();
+  private userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Wide-CLI/0.4141126";
 
   public findSystemBrowserExecutable(): string | null {
     const candidates: string[] = [];
@@ -47,17 +421,19 @@ export class HeadlessBrowserController {
       const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
 
       candidates.push(
-        path.join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe"),
-        path.join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe"),
         path.join(programFiles, "Google", "Chrome", "Application", "chrome.exe"),
         path.join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe"),
+        path.join(localAppData, "Google", "Chrome", "Application", "chrome.exe"),
+        path.join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe"),
+        path.join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe"),
         path.join(localAppData, "Microsoft", "Edge", "Application", "msedge.exe"),
-        path.join(localAppData, "Google", "Chrome", "Application", "chrome.exe")
+        path.join(programFiles, "BraveSoftware", "Brave-Browser", "Application", "brave.exe")
       );
     } else if (process.platform === "darwin") {
       candidates.push(
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
         "/Applications/Chromium.app/Contents/MacOS/Chromium"
       );
     } else {
@@ -66,18 +442,208 @@ export class HeadlessBrowserController {
         "/usr/bin/google-chrome-stable",
         "/usr/bin/chromium",
         "/usr/bin/chromium-browser",
-        "/usr/bin/microsoft-edge"
+        "/usr/bin/microsoft-edge",
+        "/usr/bin/brave-browser"
       );
     }
 
     for (const p of candidates) {
-      if (fs.existsSync(p)) return p;
+      if (p && fs.existsSync(p)) return p;
     }
     return null;
   }
 
+  private normalizeTargetUrl(rawUrl: string): string {
+    const trimmed = String(rawUrl || "").trim();
+    if (!trimmed) return "about:blank";
+    if (/^(?:https?|about|data|file):\/\//i.test(trimmed) || trimmed === "about:blank") {
+      return trimmed;
+    }
+    const scheme = /^(?:localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(?:[:/]|$)/i.test(trimmed)
+      ? "http://"
+      : "https://";
+    return scheme + trimmed;
+  }
+
+  private async tryLoadPlaywright(): Promise<any | null> {
+    if (process.env.WIDE_CLI_BROWSER_HTTP_ONLY === "1") return null;
+    try {
+      const req = createRequire(import.meta.url);
+      const baseDir = path.dirname(req.resolve("./browser.js"));
+      const siblingIde = path.resolve(baseDir, "../../../../wide-ide/node_modules/playwright-core");
+      const siblingWide = path.resolve(baseDir, "../../../../wide/node_modules/playwright-core");
+      for (const id of ["playwright-core", siblingIde, siblingWide]) {
+        try {
+          return req(id);
+        } catch {
+        }
+      }
+    } catch {
+    }
+    return null;
+  }
+
+  private async ensureLiveSession(): Promise<"playwright" | "cdp" | "http"> {
+    if (this.pwPage) return "playwright";
+    if (this.cdp) return "cdp";
+    if (process.env.WIDE_CLI_BROWSER_HTTP_ONLY === "1") return "http";
+
+    registerProcessCleanup();
+    activeControllers.add(this);
+
+    const exe = this.findSystemBrowserExecutable();
+    const proxyUrl = process.env.WIDE_CATCHER_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
+
+    const pw = await this.tryLoadPlaywright();
+    if (pw?.chromium && exe) {
+      try {
+        const launchOpts: any = {
+          executablePath: exe,
+          headless: true,
+          args: ["--no-sandbox", "--disable-gpu"]
+        };
+        if (proxyUrl) {
+          launchOpts.proxy = { server: proxyUrl };
+        }
+        this.pwBrowser = await pw.chromium.launch(launchOpts);
+        this.pwContext = await this.pwBrowser.newContext({ viewport: { width: 1280, height: 800 } });
+        this.pwPage = await this.pwContext.newPage();
+        this.pwPage.on("console", (msg: any) => {
+          this.pushConsoleEntry(msg.type(), msg.text());
+        });
+        this.pwPage.on("pageerror", (err: Error) => {
+          this.pushConsoleEntry("error", err.message);
+        });
+        this.pwPage.on("response", (res: any) => {
+          try {
+            if (res.request()?.isNavigationRequest?.()) {
+              this.state.statusCode = res.status();
+            }
+          } catch {
+          }
+        });
+        this.state.mode = "playwright";
+        return "playwright";
+      } catch {
+        await this.cleanupLiveDrivers();
+      }
+    }
+
+    if (exe) {
+      try {
+        const session = new NativeCdpSession();
+        await session.connect(exe, proxyUrl || undefined);
+        this.cdp = session;
+        this.state.mode = "cdp";
+        return "cdp";
+      } catch {
+        await this.cleanupLiveDrivers();
+      }
+    }
+
+    this.state.mode = "http";
+    return "http";
+  }
+
+  private pushConsoleEntry(level: string, text: string): void {
+    this.consoleBuffer.push({
+      level: String(level || "log"),
+      text: String(text || ""),
+      timestamp: new Date().toISOString()
+    });
+    if (this.consoleBuffer.length > 200) {
+      this.consoleBuffer.shift();
+    }
+  }
+
+  private async cleanupLiveDrivers(): Promise<void> {
+    if (this.pwBrowser) {
+      try {
+        await this.pwBrowser.close();
+      } catch {
+      }
+      this.pwPage = null;
+      this.pwContext = null;
+      this.pwBrowser = null;
+    }
+    if (this.cdp) {
+      await this.cdp.dispose();
+      this.cdp = null;
+    }
+    activeControllers.delete(this);
+  }
+
+  public forceDisposeSync(): void {
+    try {
+      if (this.cdp) {
+        void this.cdp.dispose();
+        this.cdp = null;
+      }
+      if (this.pwBrowser) {
+        void this.pwBrowser.close();
+        this.pwBrowser = null;
+        this.pwContext = null;
+        this.pwPage = null;
+      }
+    } catch {
+    }
+  }
+
+  private async syncLiveDomState(): Promise<void> {
+    let snap: any = null;
+    if (this.pwPage) {
+      snap = await this.pwPage.evaluate(SNAPSHOT_DOM_SCRIPT);
+    } else if (this.cdp) {
+      snap = await this.cdp.evalValue(SNAPSHOT_DOM_SCRIPT);
+      this.state.statusCode = this.cdp.lastStatusCode;
+    }
+    if (!snap) return;
+
+    this.state.url = String(snap.url || this.state.url);
+    this.state.title = String(snap.title || this.state.url);
+    this.state.textContent = String(snap.textContent || "");
+    this.state.rawHtml = String(snap.rawHtml || "");
+    this.state.elements = Array.isArray(snap.elements) ? snap.elements : [];
+  }
+
+  private resolveTargetRefOrSelector(target: string): { ref?: string; matched?: DOMElement; cssSelector?: string } {
+    const clean = String(target || "").trim();
+    const lower = clean.toLowerCase();
+
+    if (/^@?e\d+$/i.test(clean)) {
+      const normalizedRef = clean.startsWith("@") ? clean.toLowerCase() : `@${clean.toLowerCase()}`;
+      const el = this.state.elements.find((e) => (e.ref || `@e${e.index}`).toLowerCase() === normalizedRef);
+      return { ref: normalizedRef, matched: el, cssSelector: `[data-wide-ref="${normalizedRef}"]` };
+    }
+
+    if (/^\[\d+\]$/.test(clean) || /^\d+$/.test(clean)) {
+      const idx = parseInt(clean.replace(/[\[\]]/g, ""), 10);
+      const el = this.state.elements.find((e) => e.index === idx);
+      const ref = el?.ref || `@e${idx}`;
+      return { ref, matched: el, cssSelector: `[data-wide-ref="${ref}"]` };
+    }
+
+    const byMeta = this.state.elements.find(
+      (e) =>
+        e.text.toLowerCase().includes(lower) ||
+        (e.name && e.name.toLowerCase().includes(lower)) ||
+        (e.attributes?.placeholder && e.attributes.placeholder.toLowerCase().includes(lower)) ||
+        (e.attributes?.id && e.attributes.id.toLowerCase() === lower)
+    );
+    if (byMeta) {
+      const ref = byMeta.ref || `@e${byMeta.index}`;
+      return { ref, matched: byMeta, cssSelector: `[data-wide-ref="${ref}"]` };
+    }
+
+    if (/^[#.\[]|^[a-z]+\[/i.test(clean)) {
+      return { cssSelector: clean };
+    }
+
+    return {};
+  }
+
   public parseHtml(rawHtml: string): { title: string; elements: DOMElement[]; textContent: string } {
-    let clean = rawHtml
+    const clean = rawHtml
       .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
       .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "")
       .replace(/<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi, "")
@@ -102,7 +668,8 @@ export class HeadlessBrowserController {
       const desc = placeholder || name || val || role;
 
       elements.push({
-        index: elemIdx++,
+        index: elemIdx,
+        ref: `@e${elemIdx}`,
         tag: "input",
         text: desc,
         role,
@@ -110,6 +677,7 @@ export class HeadlessBrowserController {
         value: val,
         attributes: attrs
       });
+      elemIdx++;
     }
 
     const tagRegex = /<(a|button|select|textarea)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
@@ -123,7 +691,8 @@ export class HeadlessBrowserController {
       const text = inner || attrs["aria-label"] || attrs["title"] || role;
 
       elements.push({
-        index: elemIdx++,
+        index: elemIdx,
+        ref: `@e${elemIdx}`,
         tag,
         text,
         role,
@@ -131,6 +700,7 @@ export class HeadlessBrowserController {
         name: attrs.name,
         attributes: attrs
       });
+      elemIdx++;
     }
 
     const plainText = clean
@@ -157,23 +727,71 @@ export class HeadlessBrowserController {
     return attrs;
   }
 
+  public async open(url?: string): Promise<string> {
+    const mode = await this.ensureLiveSession();
+    if (url && url.trim()) {
+      return this.navigate(url);
+    }
+    return `Browser session initialized (engine: ${mode}, url: ${this.state.url}).`;
+  }
+
   public async navigate(url: string): Promise<string> {
-    let target = url.trim();
-    if (!target.startsWith("http://") && !target.startsWith("https://")) {
-      target = "https://" + target;
+    const target = this.normalizeTargetUrl(url);
+    const mode = await this.ensureLiveSession();
+
+    if (mode === "playwright" && this.pwPage) {
+      try {
+        const res = await this.pwPage.goto(target, { waitUntil: "domcontentloaded", timeout: 25000 });
+        if (res) this.state.statusCode = res.status();
+        await this.pwPage.waitForTimeout(150);
+        this.state.history.push(target);
+        this.state.formInputs = {};
+        await this.syncLiveDomState();
+        return this.renderView();
+      } catch (err: any) {
+        return `Navigation failed for ${target}: ${err.message}`;
+      }
+    }
+
+    if (mode === "cdp" && this.cdp) {
+      try {
+        let loaded = false;
+        const offLoad = this.cdp.on("Page.loadEventFired", () => {
+          loaded = true;
+        });
+        await this.cdp.send("Page.navigate", { url: target });
+        const deadline = Date.now() + 15000;
+        while (!loaded && Date.now() < deadline) {
+          const ready = await this.cdp.evalValue("document.readyState").catch(() => "loading");
+          if (ready === "complete" || ready === "interactive") {
+            loaded = true;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        offLoad();
+        await new Promise((r) => setTimeout(r, 150));
+        this.state.history.push(target);
+        this.state.formInputs = {};
+        await this.syncLiveDomState();
+        return this.renderView();
+      } catch (err: any) {
+        return `Navigation failed for ${target}: ${err.message}`;
+      }
     }
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 20000);
 
     try {
-      const res = await fetch(target, {
-        headers: {
-          "User-Agent": this.userAgent,
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*;q=0.8"
-        },
-        signal: controller.signal
-      });
+      const headers: Record<string, string> = {
+        "User-Agent": this.userAgent,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*;q=0.8"
+      };
+      if (this.cookieJar.size > 0) {
+        headers.Cookie = Array.from(this.cookieJar.entries()).map(([k, v]) => `${k}=${v}`).join("; ");
+      }
+      const res = await fetch(target, { headers, signal: controller.signal });
       clearTimeout(timer);
 
       this.state.statusCode = res.status;
@@ -194,39 +812,72 @@ export class HeadlessBrowserController {
     }
   }
 
+  public async snapshot(): Promise<string> {
+    if (this.pwPage || this.cdp) {
+      await this.syncLiveDomState();
+    }
+    return this.renderView();
+  }
+
   public async click(target: string): Promise<string> {
+    if (this.pwPage) {
+      const resolved = this.resolveTargetRefOrSelector(target);
+      if (resolved.cssSelector) {
+        await this.pwPage.locator(resolved.cssSelector).first().click({ timeout: 8000 });
+        await this.pwPage.waitForTimeout(250);
+        await this.syncLiveDomState();
+        return `Clicked ${resolved.ref || target}.\n\n${this.renderView()}`;
+      }
+      const loc = this.pwPage.getByText(target, { exact: false }).first();
+      await loc.click({ timeout: 8000 });
+      await this.pwPage.waitForTimeout(250);
+      await this.syncLiveDomState();
+      return `Clicked '${target}'.\n\n${this.renderView()}`;
+    }
+
+    if (this.cdp) {
+      const resolved = this.resolveTargetRefOrSelector(target);
+      const selector = resolved.cssSelector || "";
+      const coords = await this.cdp.evalValue(`(() => {
+        let el = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : "null"};
+        if (!el) {
+          const needle = ${JSON.stringify(target.trim().toLowerCase())};
+          const list = Array.from(document.querySelectorAll('a,button,input,select,textarea,[role="button"],[role="link"]'));
+          el = list.find((n) => (n.innerText || n.textContent || n.getAttribute('aria-label') || '').toLowerCase().includes(needle)) || null;
+        }
+        if (!el) return { found: false };
+        el.scrollIntoView({ block: 'center', inline: 'center' });
+        const r = el.getBoundingClientRect();
+        return { found: true, x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      })()`);
+      if (!coords?.found) {
+        const available = this.state.elements.slice(0, 10).map((e) => `${e.ref || `[${e.index}]`} ${e.role}: ${e.text.slice(0, 25)}`).join(", ");
+        return `Element '${target}' not found. Available elements: ${available}`;
+      }
+      const cx = Math.max(1, Math.round(coords.x));
+      const cy = Math.max(1, Math.round(coords.y));
+      await this.cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: cx, y: cy, button: "left", clickCount: 1 });
+      await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: cx, y: cy, button: "left", clickCount: 1 });
+      await new Promise((r) => setTimeout(r, 300));
+      await this.syncLiveDomState();
+      return `Clicked ${resolved.ref || target}.\n\n${this.renderView()}`;
+    }
+
     if (this.state.elements.length === 0) {
       return "No interactive elements on the current page. Please navigate first.";
     }
 
-    const cleanTarget = target.trim().toLowerCase();
-    let matched: DOMElement | undefined;
-
-    if (cleanTarget.startsWith("[") && cleanTarget.endsWith("]")) {
-      const idx = parseInt(cleanTarget.slice(1, -1), 10);
-      matched = this.state.elements.find(e => e.index === idx);
-    } else {
-      const idx = parseInt(cleanTarget, 10);
-      if (!isNaN(idx)) {
-        matched = this.state.elements.find(e => e.index === idx);
-      }
-    }
+    const resolved = this.resolveTargetRefOrSelector(target);
+    const matched = resolved.matched;
 
     if (!matched) {
-      matched = this.state.elements.find(e =>
-        e.text.toLowerCase().includes(cleanTarget) ||
-        (e.name && e.name.toLowerCase().includes(cleanTarget))
-      );
-    }
-
-    if (!matched) {
-      const available = this.state.elements.slice(0, 10).map(e => `[${e.index}] ${e.role}: ${e.text.slice(0, 25)}`).join(", ");
+      const available = this.state.elements.slice(0, 10).map((e) => `[${e.index}] ${e.role}: ${e.text.slice(0, 25)}`).join(", ");
       return `Element '${target}' not found. Available elements: ${available}`;
     }
 
     if (matched.href) {
-      const resolved = new URL(matched.href, this.state.url).toString();
-      return await this.navigate(resolved);
+      const resolvedUrl = new URL(matched.href, this.state.url).toString();
+      return await this.navigate(resolvedUrl);
     }
 
     if (matched.tag === "button" || (matched.tag === "input" && ["submit", "button"].includes(matched.attributes.type || ""))) {
@@ -267,22 +918,55 @@ export class HeadlessBrowserController {
     return `Clicked [${matched.index}] ${matched.role}: ${matched.text}`;
   }
 
-  public fill(target: string, text: string, submit = false): Promise<string> {
-    const cleanTarget = target.trim().toLowerCase();
-    let matched: DOMElement | undefined;
-
-    if (cleanTarget.startsWith("[") && cleanTarget.endsWith("]")) {
-      const idx = parseInt(cleanTarget.slice(1, -1), 10);
-      matched = this.state.elements.find(e => e.index === idx);
-    } else {
-      const idx = parseInt(cleanTarget, 10);
-      if (!isNaN(idx)) {
-        matched = this.state.elements.find(e => e.index === idx);
+  public async fill(target: string, text: string, submit = false): Promise<string> {
+    if (this.pwPage) {
+      const resolved = this.resolveTargetRefOrSelector(target);
+      if (!resolved.cssSelector) {
+        return `Input element '${target}' not found in live page snapshot.`;
       }
+      const loc = this.pwPage.locator(resolved.cssSelector).first();
+      await loc.fill(text, { timeout: 8000 });
+      if (submit) {
+        await loc.press("Enter");
+        await this.pwPage.waitForTimeout(250);
+      }
+      await this.syncLiveDomState();
+      return `Filled ${resolved.ref || target} with value '${text}'${submit ? " and submitted" : ""}.`;
     }
 
+    if (this.cdp) {
+      const resolved = this.resolveTargetRefOrSelector(target);
+      const selector = resolved.cssSelector || "";
+      const focused = await this.cdp.evalValue(`(() => {
+        let el = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : "null"};
+        if (!el) {
+          const needle = ${JSON.stringify(target.trim().toLowerCase())};
+          const list = Array.from(document.querySelectorAll('input,textarea'));
+          el = list.find((n) => ((n.name || '') + ' ' + (n.placeholder || '') + ' ' + (n.getAttribute('aria-label') || '')).toLowerCase().includes(needle)) || null;
+        }
+        if (!el) return false;
+        el.focus();
+        el.value = ${JSON.stringify(text)};
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`);
+      if (!focused) {
+        return `Input element '${target}' not found.`;
+      }
+      if (submit) {
+        await this.press("Enter");
+      }
+      await this.syncLiveDomState();
+      return `Filled ${resolved.ref || target} with value '${text}'${submit ? " and submitted" : ""}.`;
+    }
+
+    const resolved = this.resolveTargetRefOrSelector(target);
+    let matched = resolved.matched;
+    const cleanTarget = target.trim().toLowerCase();
+
     if (!matched) {
-      matched = this.state.elements.find(e =>
+      matched = this.state.elements.find((e) =>
         ["input", "textarea"].includes(e.tag) && (
           e.text.toLowerCase().includes(cleanTarget) ||
           (e.name && e.name.toLowerCase().includes(cleanTarget)) ||
@@ -299,11 +983,147 @@ export class HeadlessBrowserController {
     }
 
     const desc = matched ? `[${matched.index}] ${matched.role}` : fieldName;
-    return Promise.resolve(`Filled ${desc} with value '${text}'.`);
+    return `Filled ${desc} with value '${text}'.`;
+  }
+
+  public async press(key: string): Promise<string> {
+    if (this.pwPage) {
+      await this.pwPage.keyboard.press(key);
+      await this.pwPage.waitForTimeout(200);
+      await this.syncLiveDomState();
+      return `Pressed key '${key}'.`;
+    }
+    if (this.cdp) {
+      const keyCode = key === "Enter" ? 13 : key === "Tab" ? 9 : key === "Escape" ? 27 : 0;
+      await this.cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key, windowsVirtualKeyCode: keyCode });
+      await this.cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key, windowsVirtualKeyCode: keyCode });
+      await new Promise((r) => setTimeout(r, 200));
+      await this.syncLiveDomState();
+      return `Pressed key '${key}'.`;
+    }
+    if (key.toLowerCase() === "enter" && Object.keys(this.state.formInputs).length > 0) {
+      return this.click("submit");
+    }
+    return `Simulated key press '${key}' on ${this.state.url}.`;
+  }
+
+  public async hover(target: string): Promise<string> {
+    if (this.pwPage) {
+      const resolved = this.resolveTargetRefOrSelector(target);
+      if (resolved.cssSelector) {
+        await this.pwPage.locator(resolved.cssSelector).first().hover({ timeout: 6000 });
+        return `Hovered over ${resolved.ref || target}.`;
+      }
+    }
+    if (this.cdp) {
+      const resolved = this.resolveTargetRefOrSelector(target);
+      const selector = resolved.cssSelector || target;
+      const coords = await this.cdp.evalValue(`(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return null;
+        el.scrollIntoView({ block: 'center' });
+        const r = el.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      })()`);
+      if (coords) {
+        await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: Math.round(coords.x), y: Math.round(coords.y) });
+        return `Hovered over ${resolved.ref || target}.`;
+      }
+    }
+    return `Hovered over '${target}' on ${this.state.url}.`;
+  }
+
+  public async select(target: string, value: string): Promise<string> {
+    if (this.pwPage) {
+      const resolved = this.resolveTargetRefOrSelector(target);
+      if (resolved.cssSelector) {
+        await this.pwPage.locator(resolved.cssSelector).first().selectOption(value);
+        await this.syncLiveDomState();
+        return `Selected '${value}' on ${resolved.ref || target}.`;
+      }
+    }
+    if (this.cdp) {
+      const resolved = this.resolveTargetRefOrSelector(target);
+      const selector = resolved.cssSelector || target;
+      const ok = await this.cdp.evalValue(`(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el || el.tagName.toLowerCase() !== 'select') return false;
+        el.value = ${JSON.stringify(value)};
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`);
+      if (!ok) return `Select element '${target}' not found.`;
+      await this.syncLiveDomState();
+      return `Selected '${value}' on ${resolved.ref || target}.`;
+    }
+    this.state.formInputs[target] = value;
+    return `Selected '${value}' for '${target}'.`;
+  }
+
+  public async scroll(direction: "up" | "down" | "top" | "bottom" = "down", pixels = 500): Promise<string> {
+    const js =
+      direction === "top"
+        ? "window.scrollTo(0, 0)"
+        : direction === "bottom"
+          ? "window.scrollTo(0, document.body.scrollHeight)"
+          : `window.scrollBy(0, ${direction === "up" ? -Math.abs(pixels) : Math.abs(pixels)})`;
+    if (this.pwPage) {
+      await this.pwPage.evaluate(js);
+      return `Scrolled ${direction} (${pixels}px).`;
+    }
+    if (this.cdp) {
+      await this.cdp.evalValue(js);
+      return `Scrolled ${direction} (${pixels}px).`;
+    }
+    return `Scrolled ${direction} in viewport state.`;
+  }
+
+  public async wait(opts: { ms?: number; selector?: string; text?: string }): Promise<string> {
+    const ms = Math.min(Math.max(Number(opts.ms || 1000), 50), 15000);
+    if (opts.selector) {
+      if (this.pwPage) {
+        await this.pwPage.waitForSelector(opts.selector, { timeout: ms });
+        await this.syncLiveDomState();
+        return `Selector '${opts.selector}' appeared.`;
+      }
+      if (this.cdp) {
+        const deadline = Date.now() + ms;
+        while (Date.now() < deadline) {
+          const found = await this.cdp.evalValue(`Boolean(document.querySelector(${JSON.stringify(opts.selector)}))`).catch(() => false);
+          if (found) {
+            await this.syncLiveDomState();
+            return `Selector '${opts.selector}' appeared.`;
+          }
+          await new Promise((r) => setTimeout(r, 150));
+        }
+        throw new Error(`Timed out waiting for selector '${opts.selector}'`);
+      }
+    }
+    if (opts.text) {
+      if (this.pwPage) {
+        await this.pwPage.getByText(opts.text).first().waitFor({ timeout: ms });
+        await this.syncLiveDomState();
+        return `Text '${opts.text}' appeared.`;
+      }
+      if (this.cdp) {
+        const deadline = Date.now() + ms;
+        while (Date.now() < deadline) {
+          const hasText = await this.cdp.evalValue(`document.body ? document.body.innerText.includes(${JSON.stringify(opts.text)}) : false`).catch(() => false);
+          if (hasText) {
+            await this.syncLiveDomState();
+            return `Text '${opts.text}' appeared.`;
+          }
+          await new Promise((r) => setTimeout(r, 150));
+        }
+        throw new Error(`Timed out waiting for text '${opts.text}'`);
+      }
+    }
+    await new Promise((r) => setTimeout(r, ms));
+    return `Waited ${ms}ms.`;
   }
 
   public extract(query = ""): string {
-    if (!this.state.rawHtml) {
+    if (!this.state.rawHtml && !this.state.textContent) {
       return "No webpage currently loaded. Use browser_navigate first.";
     }
 
@@ -318,8 +1138,8 @@ export class HeadlessBrowserController {
       const qLower = query.toLowerCase();
       const matched = this.state.textContent
         .split(/(?<=\.|\n)/)
-        .map(s => s.trim())
-        .filter(s => s.toLowerCase().includes(qLower));
+        .map((s) => s.trim())
+        .filter((s) => s.toLowerCase().includes(qLower));
 
       if (matched.length > 0) {
         lines.push(`Content matching '${query}':`);
@@ -334,6 +1154,25 @@ export class HeadlessBrowserController {
     }
 
     return lines.join("\n");
+  }
+
+  public async captureScreenshotFile(outputDir?: string): Promise<string | null> {
+    let pngBuffer: Buffer | null = null;
+    if (this.pwPage) {
+      pngBuffer = await this.pwPage.screenshot({ type: "png" });
+    } else if (this.cdp) {
+      const res = await this.cdp.send("Page.captureScreenshot", { format: "png" });
+      if (res?.data) {
+        pngBuffer = Buffer.from(res.data, "base64");
+      }
+    }
+    if (!pngBuffer) return null;
+    const baseDir = outputDir ? path.join(outputDir, ".wide", "screenshots") : os.tmpdir();
+    fs.mkdirSync(baseDir, { recursive: true });
+    const outPath = path.join(baseDir, `wide-browser-${Date.now()}.png`);
+    fs.writeFileSync(outPath, pngBuffer);
+    this.state.lastScreenshotPath = outPath;
+    return outPath;
   }
 
   public screenshot(): string {
@@ -352,7 +1191,59 @@ export class HeadlessBrowserController {
     }
 
     lines.push("+----------------------------------------------------------------+");
+    if (this.state.lastScreenshotPath) {
+      lines.push(`Screenshot saved: ${this.state.lastScreenshotPath}`);
+    }
     return lines.join("\n");
+  }
+
+  public getConsole(clear = false): BrowserConsoleEntry[] {
+    const merged = this.cdp ? [...this.consoleBuffer, ...this.cdp.consoleEntries] : [...this.consoleBuffer];
+    if (clear) {
+      this.consoleBuffer = [];
+      if (this.cdp) this.cdp.consoleEntries = [];
+    }
+    return merged;
+  }
+
+  public async cookies(action: "get" | "set" | "clear" = "get", cookie?: { name: string; value: string; url?: string }): Promise<string> {
+    if (action === "clear") {
+      this.cookieJar.clear();
+      if (this.pwContext) await this.pwContext.clearCookies();
+      if (this.cdp) await this.cdp.send("Network.clearBrowserCookies");
+      return "Cleared browser cookies.";
+    }
+    if (action === "set" && cookie?.name) {
+      const targetUrl = cookie.url || (this.state.url.startsWith("http") ? this.state.url : "http://127.0.0.1/");
+      this.cookieJar.set(cookie.name, cookie.value);
+      if (this.pwContext) {
+        await this.pwContext.addCookies([{ name: cookie.name, value: cookie.value, url: targetUrl }]);
+      } else if (this.cdp) {
+        await this.cdp.send("Network.setCookie", { name: cookie.name, value: cookie.value, url: targetUrl });
+      }
+      return `Set cookie '${cookie.name}'.`;
+    }
+    if (this.pwContext) {
+      const list = await this.pwContext.cookies();
+      return JSON.stringify(list, null, 2);
+    }
+    if (this.cdp) {
+      const res = await this.cdp.send("Network.getCookies");
+      return JSON.stringify(res?.cookies || [], null, 2);
+    }
+    return JSON.stringify(Array.from(this.cookieJar.entries()).map(([name, value]) => ({ name, value })), null, 2);
+  }
+
+  public async evalJs(script: string): Promise<string> {
+    if (this.pwPage) {
+      const val = await this.pwPage.evaluate(script);
+      return typeof val === "string" ? val : JSON.stringify(val, null, 2);
+    }
+    if (this.cdp) {
+      const val = await this.cdp.evalValue(script);
+      return typeof val === "string" ? val : JSON.stringify(val, null, 2);
+    }
+    throw new Error("JavaScript evaluation requires an active Chromium/Edge browser session (call browser_open or browser_navigate first).");
   }
 
   public renderView(): string {
@@ -360,16 +1251,18 @@ export class HeadlessBrowserController {
       `Page Title: ${this.state.title}`,
       `Current URL: ${this.state.url}`,
       `Status Code: ${this.state.statusCode}`,
+      `Engine: ${this.state.mode || "http"}`,
       "",
-      "Interactive Elements:"
+      "Interactive Elements (target by @eN ref, [N], or label):"
     ];
 
     if (this.state.elements.length === 0) {
       out.push("(No interactive elements found)");
     } else {
-      for (const el of this.state.elements.slice(0, 25)) {
+      for (const el of this.state.elements.slice(0, 35)) {
+        const ref = el.ref || `@e${el.index}`;
         const extra = el.href ? ` -> ${el.href}` : "";
-        out.push(`[${el.index}] ${el.role}: ${el.text}${extra}`);
+        out.push(`[${el.index}] (${ref}) ${el.role}: ${el.text}${extra}`);
       }
     }
 
@@ -381,6 +1274,9 @@ export class HeadlessBrowserController {
 
   public close(): string {
     const u = this.state.url;
+    void this.cleanupLiveDrivers();
+    this.consoleBuffer = [];
+    this.cookieJar.clear();
     this.state = {
       url: "about:blank",
       title: "",
@@ -389,7 +1285,8 @@ export class HeadlessBrowserController {
       textContent: "",
       rawHtml: "",
       formInputs: {},
-      history: []
+      history: [],
+      mode: "http"
     };
     return `Headless browser session closed. Cleared session for ${u}.`;
   }
@@ -397,10 +1294,32 @@ export class HeadlessBrowserController {
 
 export const defaultBrowser = new HeadlessBrowserController();
 
+export const browserOpenTool: Tool = {
+  definition: {
+    name: "browser_open",
+    description: "Initialize the real Chromium/Edge browser session and optionally navigate to an initial URL.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Optional URL to open immediately." }
+      },
+      required: []
+    }
+  },
+  async execute(params: Record<string, any>): Promise<ToolResult> {
+    try {
+      const result = await defaultBrowser.open(params.url);
+      return { success: true, output: result };
+    } catch (err: any) {
+      return { success: false, output: "", error: `Open error: ${err.message}` };
+    }
+  }
+};
+
 export const browserNavigateTool: Tool = {
   definition: {
     name: "browser_navigate",
-    description: "Navigate the autonomous background headless browser to a target URL. Returns page title, status, and numbered interactive controls.",
+    description: "Navigate the autonomous browser to a target URL. Returns page title, status, and @eN / [N] interactive element refs.",
     parameters: {
       type: "object",
       properties: {
@@ -409,7 +1328,7 @@ export const browserNavigateTool: Tool = {
       required: ["url"]
     }
   },
-  async execute(params: Record<string, any>, context: ToolExecutionContext): Promise<ToolResult> {
+  async execute(params: Record<string, any>): Promise<ToolResult> {
     try {
       const result = await defaultBrowser.navigate(params.url);
       return { success: true, output: result };
@@ -419,19 +1338,39 @@ export const browserNavigateTool: Tool = {
   }
 };
 
+export const browserSnapshotTool: Tool = {
+  definition: {
+    name: "browser_snapshot",
+    description: "Capture a fresh interactive DOM snapshot with @eN element refs and visible text from the current page.",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: []
+    }
+  },
+  async execute(): Promise<ToolResult> {
+    try {
+      const result = await defaultBrowser.snapshot();
+      return { success: true, output: result };
+    } catch (err: any) {
+      return { success: false, output: "", error: `Snapshot error: ${err.message}` };
+    }
+  }
+};
+
 export const browserClickTool: Tool = {
   definition: {
     name: "browser_click",
-    description: "Click an interactive element (link, button, tab) in the headless browser by its index (e.g. '[1]') or text label.",
+    description: "Click an interactive element (link, button, tab) by its @eN ref, [N] index, CSS selector, or text label.",
     parameters: {
       type: "object",
       properties: {
-        target: { type: "string", description: "Element index (e.g. '[3]' or '3') or text label to click." }
+        target: { type: "string", description: "Element ref ('@e3'), index ('[3]' or '3'), CSS selector, or text label." }
       },
       required: ["target"]
     }
   },
-  async execute(params: Record<string, any>, context: ToolExecutionContext): Promise<ToolResult> {
+  async execute(params: Record<string, any>): Promise<ToolResult> {
     try {
       const result = await defaultBrowser.click(params.target);
       return { success: true, output: result };
@@ -444,18 +1383,18 @@ export const browserClickTool: Tool = {
 export const browserTypeTool: Tool = {
   definition: {
     name: "browser_type",
-    description: "Fill text into an input field or textarea identified by its index (e.g. '[2]') or name/placeholder, with optional form submission.",
+    description: "Fill text into an input field or textarea identified by @eN ref, [N] index, CSS selector, or name/placeholder.",
     parameters: {
       type: "object",
       properties: {
-        target: { type: "string", description: "Element index (e.g. '[2]') or input name/placeholder." },
+        target: { type: "string", description: "Element ref ('@e2'), index ('[2]'), CSS selector, or input name/placeholder." },
         text: { type: "string", description: "Text string to fill into the input field." },
-        submit: { type: "boolean", description: "Optional boolean flag to automatically submit the form after typing." }
+        submit: { type: "boolean", description: "Optional boolean flag to submit after typing." }
       },
       required: ["target", "text"]
     }
   },
-  async execute(params: Record<string, any>, context: ToolExecutionContext): Promise<ToolResult> {
+  async execute(params: Record<string, any>): Promise<ToolResult> {
     try {
       const result = await defaultBrowser.fill(params.target, params.text, Boolean(params.submit));
       return { success: true, output: result };
@@ -465,10 +1404,124 @@ export const browserTypeTool: Tool = {
   }
 };
 
+export const browserPressTool: Tool = {
+  definition: {
+    name: "browser_press",
+    description: "Dispatch a keyboard key press (e.g. Enter, Tab, Escape, ArrowDown) in the active browser page.",
+    parameters: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "Key name (e.g. 'Enter', 'Tab', 'Escape')." }
+      },
+      required: ["key"]
+    }
+  },
+  async execute(params: Record<string, any>): Promise<ToolResult> {
+    try {
+      const result = await defaultBrowser.press(params.key);
+      return { success: true, output: result };
+    } catch (err: any) {
+      return { success: false, output: "", error: `Key press error: ${err.message}` };
+    }
+  }
+};
+
+export const browserHoverTool: Tool = {
+  definition: {
+    name: "browser_hover",
+    description: "Hover the mouse cursor over an element identified by @eN ref, index, or CSS selector.",
+    parameters: {
+      type: "object",
+      properties: {
+        target: { type: "string", description: "Element ref, index, or CSS selector." }
+      },
+      required: ["target"]
+    }
+  },
+  async execute(params: Record<string, any>): Promise<ToolResult> {
+    try {
+      const result = await defaultBrowser.hover(params.target);
+      return { success: true, output: result };
+    } catch (err: any) {
+      return { success: false, output: "", error: `Hover error: ${err.message}` };
+    }
+  }
+};
+
+export const browserSelectTool: Tool = {
+  definition: {
+    name: "browser_select",
+    description: "Select an option value on a <select> dropdown element.",
+    parameters: {
+      type: "object",
+      properties: {
+        target: { type: "string", description: "Select element @eN ref, index, or CSS selector." },
+        value: { type: "string", description: "Option value to select." }
+      },
+      required: ["target", "value"]
+    }
+  },
+  async execute(params: Record<string, any>): Promise<ToolResult> {
+    try {
+      const result = await defaultBrowser.select(params.target, params.value);
+      return { success: true, output: result };
+    } catch (err: any) {
+      return { success: false, output: "", error: `Select error: ${err.message}` };
+    }
+  }
+};
+
+export const browserScrollTool: Tool = {
+  definition: {
+    name: "browser_scroll",
+    description: "Scroll the browser viewport up, down, top, or bottom.",
+    parameters: {
+      type: "object",
+      properties: {
+        direction: { type: "string", description: "Scroll direction.", enum: ["up", "down", "top", "bottom"] },
+        pixels: { type: "number", description: "Pixels to scroll for up/down (default: 500)." }
+      },
+      required: []
+    }
+  },
+  async execute(params: Record<string, any>): Promise<ToolResult> {
+    try {
+      const result = await defaultBrowser.scroll(params.direction || "down", params.pixels || 500);
+      return { success: true, output: result };
+    } catch (err: any) {
+      return { success: false, output: "", error: `Scroll error: ${err.message}` };
+    }
+  }
+};
+
+export const browserWaitTool: Tool = {
+  definition: {
+    name: "browser_wait",
+    description: "Wait for a CSS selector, visible text, or fixed duration in the browser.",
+    parameters: {
+      type: "object",
+      properties: {
+        ms: { type: "number", description: "Timeout or wait duration in milliseconds." },
+        selector: { type: "string", description: "Optional CSS selector to wait for." },
+        text: { type: "string", description: "Optional visible text to wait for." }
+      },
+      required: []
+    }
+  },
+  async execute(params: Record<string, any>): Promise<ToolResult> {
+    try {
+      const result = await defaultBrowser.wait({ ms: params.ms, selector: params.selector, text: params.text });
+      return { success: true, output: result };
+    } catch (err: any) {
+      return { success: false, output: "", error: `Wait error: ${err.message}` };
+    }
+  }
+};
+
 export const browserExtractTool: Tool = {
   definition: {
     name: "browser_extract",
-    description: "Extract text content or search for specific keywords from the currently loaded page in the headless browser.",
+    description: "Extract text content or search for specific keywords from the currently loaded page.",
     parameters: {
       type: "object",
       properties: {
@@ -477,7 +1530,7 @@ export const browserExtractTool: Tool = {
       required: []
     }
   },
-  async execute(params: Record<string, any>, context: ToolExecutionContext): Promise<ToolResult> {
+  async execute(params: Record<string, any>): Promise<ToolResult> {
     try {
       const result = defaultBrowser.extract(params.query || "");
       return { success: true, output: result };
@@ -490,15 +1543,16 @@ export const browserExtractTool: Tool = {
 export const browserScreenshotTool: Tool = {
   definition: {
     name: "browser_screenshot",
-    description: "Capture a structured viewport snapshot of the current headless browser state including title, URL, status code, and interactive elements.",
+    description: "Capture a screenshot PNG (when Chromium/Edge is active) and structured viewport snapshot.",
     parameters: {
       type: "object",
       properties: {},
       required: []
     }
   },
-  async execute(params: Record<string, any>, context: ToolExecutionContext): Promise<ToolResult> {
+  async execute(_params: Record<string, any>, context: ToolExecutionContext): Promise<ToolResult> {
     try {
+      await defaultBrowser.captureScreenshotFile(context?.workingDirectory);
       const result = defaultBrowser.screenshot();
       return { success: true, output: result };
     } catch (err: any) {
@@ -507,17 +1561,87 @@ export const browserScreenshotTool: Tool = {
   }
 };
 
+export const browserConsoleTool: Tool = {
+  definition: {
+    name: "browser_console",
+    description: "Read console logs and runtime errors emitted by the active browser page.",
+    parameters: {
+      type: "object",
+      properties: {
+        clear: { type: "boolean", description: "Clear console buffer after reading." }
+      },
+      required: []
+    }
+  },
+  async execute(params: Record<string, any>): Promise<ToolResult> {
+    try {
+      const entries = defaultBrowser.getConsole(Boolean(params.clear));
+      return { success: true, output: entries.length > 0 ? JSON.stringify(entries, null, 2) : "No console messages." };
+    } catch (err: any) {
+      return { success: false, output: "", error: `Console error: ${err.message}` };
+    }
+  }
+};
+
+export const browserCookiesTool: Tool = {
+  definition: {
+    name: "browser_cookies",
+    description: "Inspect, set, or clear browser cookies.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", description: "Cookie action.", enum: ["get", "set", "clear"] },
+        name: { type: "string", description: "Cookie name (for 'set')." },
+        value: { type: "string", description: "Cookie value (for 'set')." },
+        url: { type: "string", description: "Optional cookie URL (for 'set')." }
+      },
+      required: []
+    }
+  },
+  async execute(params: Record<string, any>): Promise<ToolResult> {
+    try {
+      const action = (params.action || "get") as "get" | "set" | "clear";
+      const result = await defaultBrowser.cookies(action, params.name ? { name: params.name, value: String(params.value || ""), url: params.url } : undefined);
+      return { success: true, output: result };
+    } catch (err: any) {
+      return { success: false, output: "", error: `Cookies error: ${err.message}` };
+    }
+  }
+};
+
+export const browserEvalTool: Tool = {
+  definition: {
+    name: "browser_eval",
+    description: "Execute JavaScript in the active browser page context and return the serialized result.",
+    parameters: {
+      type: "object",
+      properties: {
+        script: { type: "string", description: "JavaScript expression or IIFE to run in the page." }
+      },
+      required: ["script"]
+    }
+  },
+  async execute(params: Record<string, any>): Promise<ToolResult> {
+    try {
+      const result = await defaultBrowser.evalJs(params.script);
+      return { success: true, output: result };
+    } catch (err: any) {
+      return { success: false, output: "", error: `Eval error: ${err.message}` };
+    }
+  }
+};
+
 export const browserCloseTool: Tool = {
   definition: {
     name: "browser_close",
-    description: "Close the active headless browser session and reset browsing history.",
+    description: "Close the active browser session and release Chromium/Edge resources.",
     parameters: {
       type: "object",
       properties: {},
       required: []
     }
   },
-  async execute(params: Record<string, any>, context: ToolExecutionContext): Promise<ToolResult> {
+  async execute(): Promise<ToolResult> {
     try {
       const result = defaultBrowser.close();
       return { success: true, output: result };

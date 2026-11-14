@@ -5,41 +5,85 @@ import { configManager } from "./config/index.js";
 import { loadWorkspaceConfig } from "./config/workspace.js";
 import { createProvider } from "./providers/index.js";
 import { startRepl } from "./repl/index.js";
-import { executeTool } from "./tools/index.js";
-import { getAllPayloadTypes } from "./security/payloads.js";
+import { loadLatestSession, loadSession } from "./repl/sessions.js";
 import { RuleLoader } from "./security/loader.js";
+import { getAllPayloadTypes } from "./security/payloads.js";
+import { executeTool } from "./tools/index.js";
+import { restoreTerminalCursor } from "./ui/spinner.js";
 
-async function readStdin(): Promise<string> {
+async function readPipedStdin(requireFullRead: boolean): Promise<string> {
   if (process.stdin.isTTY) {
     return "";
   }
   return new Promise((resolvePromise) => {
     let data = "";
+    let receivedAny = false;
+    let settled = false;
+
+    const cleanup = () => {
+      process.stdin.removeListener("data", onData);
+      process.stdin.removeListener("end", onEnd);
+      process.stdin.removeListener("error", onError);
+    };
+
+    const finish = (result: string) => {
+      if (settled) return;
+      settled = true;
+      if (idleTimer) clearTimeout(idleTimer);
+      cleanup();
+      resolvePromise(result);
+    };
+
+    const onData = (chunk: string | Buffer) => {
+      receivedAny = true;
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+      data += String(chunk);
+    };
+
+    const onEnd = () => finish(data.trim());
+    const onError = () => finish("");
+
+    let idleTimer: NodeJS.Timeout | null = null;
+    if (!requireFullRead) {
+      idleTimer = setTimeout(() => {
+        if (!receivedAny) {
+          process.stdin.pause();
+          finish("");
+        }
+      }, 60);
+      idleTimer.unref?.();
+    }
+
     process.stdin.setEncoding("utf8");
-    process.stdin.on("data", chunk => {
-      data += chunk;
-    });
-    process.stdin.on("end", () => {
-      resolvePromise(data.trim());
-    });
-    process.stdin.on("error", () => {
-      resolvePromise("");
-    });
+    process.stdin.on("data", onData);
+    process.stdin.on("end", onEnd);
+    process.stdin.on("error", onError);
+    process.stdin.resume();
   });
 }
+
+process.on("exit", () => {
+  restoreTerminalCursor();
+});
 
 const program = new Command();
 
 program
   .name("wide")
   .description("Terminal-first autonomous AI coding and security agent for the Wide ecosystem")
-  .version("0.3101126")
-  .argument("[prompt...]", "Optional one-shot prompt for the agent to execute")
-  .option("-p, --provider <provider>", "LLM provider to use (gemini, ollama, claude, deepseek, openai)")
+  .version("0.4141126")
+  .argument("[prompt...]", "Optional initial prompt for the agent")
+  .option("-p, --print", "Run a single prompt non-interactively and exit")
+  .option("-c, --continue", "Resume the most recent saved interactive session")
+  .option("-r, --resume [sessionId]", "Resume a saved interactive session by ID")
+  .option("--provider <provider>", "LLM provider to use (gemini, ollama, claude, deepseek, openai)")
   .option("-m, --model <model>", "Model name to use")
-  .option("-y, --yes", "Auto-approve all file edits and command executions")
+  .option("-y, --yes", "Auto-approve all file edits and non-destructive command executions")
   .action(async (promptParts, options) => {
-    const pipedData = await readStdin();
+    const pipedData = await readPipedStdin(Boolean(options.print));
     const argPrompt = Array.isArray(promptParts) ? promptParts.join(" ").trim() : "";
     let userPrompt = argPrompt;
 
@@ -47,28 +91,47 @@ program
       userPrompt = userPrompt ? `${userPrompt}\n\n[Piped Input]:\n${pipedData}` : pipedData;
     }
 
-    if (options.yes) {
-      configManager.set("autoApproveWrite", true);
-      configManager.set("autoApproveRun", true);
-    }
-
     const ws = loadWorkspaceConfig();
     if (ws.rules.length > 0) {
       console.log(pc.dim(`Loaded ${ws.rules.length} workspace rule(s) from .wide/rules`));
     }
 
-    if (userPrompt) {
+    const nonInteractive = Boolean(options.print || pipedData);
+    if (nonInteractive) {
+      if (!userPrompt) {
+        console.error(pc.red("Error: --print requires a prompt or piped input."));
+        process.exit(1);
+      }
       try {
         const provider = createProvider(options.provider, options.model);
         const agent = new Agent(process.cwd(), provider);
-        await agent.runPrompt(userPrompt);
+        if (options.continue) {
+          const latest = loadLatestSession();
+          if (latest) agent.loadMessages(latest.messages);
+        } else if (typeof options.resume === "string") {
+          const saved = loadSession(options.resume);
+          if (saved) agent.loadMessages(saved.messages);
+        }
+        await agent.runPrompt(userPrompt, {
+          autoApproveWrite: options.yes ? true : undefined,
+          autoApproveRun: options.yes ? true : undefined,
+        });
+        await executeTool("browser_close", {}, { workingDirectory: process.cwd() });
       } catch (err: any) {
         console.error(`${pc.red("Error:")} ${err.message}`);
         process.exit(1);
       }
-    } else {
-      await startRepl();
+      return;
     }
+
+    await startRepl({
+      initialPrompt: userPrompt || undefined,
+      continueLatest: Boolean(options.continue),
+      resumeId: typeof options.resume === "string" ? options.resume : undefined,
+      overrideProvider: options.provider,
+      overrideModel: options.model,
+      autoApproveAll: Boolean(options.yes),
+    });
   });
 
 program
@@ -92,7 +155,7 @@ program
       console.log(pc.green(`Synchronized ${ruleResult.count} security rules to ${ruleResult.path}`));
 
       console.log(pc.cyan("Checking for Wide CLI updates..."));
-      const currentVersion = "0.3.101126";
+      const currentVersion = "0.4141126";
       const res = await fetch("https://api.github.com/repos/sl4de0day/wide-cli/releases/latest", {
         headers: { "User-Agent": "Wide-CLI", Accept: "application/vnd.github+json" }
       });

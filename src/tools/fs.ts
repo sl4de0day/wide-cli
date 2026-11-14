@@ -1,8 +1,35 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { resolve, dirname, relative } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, relative, resolve } from "node:path";
 import pc from "picocolors";
 import { formatUnifiedDiff } from "../ui/diff.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
+
+async function confirmWriteAction(
+  toolName: string,
+  relPath: string,
+  diffPreview: string,
+  context: ToolExecutionContext
+): Promise<boolean> {
+  console.log(`\n${pc.cyan(`[${toolName === "write_file" ? "WRITE" : "EDIT"}]`)} ${pc.bold(relPath)}`);
+  console.log(diffPreview || pc.dim("(New file created)"));
+
+  if (context.autoApproveWrite !== false) return true;
+  if (context.sessionApprovedTools?.has("write")) return true;
+  if (!context.requestApproval) return false;
+
+  const decision = await context.requestApproval({
+    tool: toolName,
+    title: `Allow ${toolName} to modify ${relPath}?`,
+    detail: relPath,
+    preview: diffPreview,
+    sessionKey: "write",
+  });
+  if (decision === "always") {
+    context.sessionApprovedTools?.add("write");
+    return true;
+  }
+  return decision === "once";
+}
 
 export const readFileTool: Tool = {
   definition: {
@@ -73,11 +100,10 @@ export const writeFileTool: Tool = {
       }
 
       const oldContent = existsSync(fullPath) ? readFileSync(fullPath, "utf8") : "";
-      
-      if (!context.autoApproveWrite) {
-        console.log(`\n${pc.cyan("[WRITE]")} ${pc.bold(relPath)}`);
-        const diff = formatUnifiedDiff(relPath, oldContent, params.content);
-        console.log(diff || pc.dim("(New file created)"));
+      const diff = formatUnifiedDiff(relPath, oldContent, params.content);
+      const allowed = await confirmWriteAction("write_file", relPath, diff, context);
+      if (!allowed) {
+        return { success: false, output: "", error: `Write denied for ${relPath}` };
       }
 
       writeFileSync(fullPath, params.content, "utf8");
@@ -124,11 +150,10 @@ export const editFileTool: Tool = {
       }
 
       const newContent = content.replace(params.target, params.replacement);
-
-      if (!context.autoApproveWrite) {
-        console.log(`\n${pc.cyan("[EDIT]")} ${pc.bold(relPath)}`);
-        const diff = formatUnifiedDiff(relPath, content, newContent);
-        console.log(diff);
+      const diff = formatUnifiedDiff(relPath, content, newContent);
+      const allowed = await confirmWriteAction("edit_file", relPath, diff, context);
+      if (!allowed) {
+        return { success: false, output: "", error: `Edit denied for ${relPath}` };
       }
 
       writeFileSync(fullPath, newContent, "utf8");

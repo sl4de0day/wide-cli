@@ -1,10 +1,33 @@
 import type { LLMProvider, ChatMessage, ProviderResponse, ToolCall } from "./types.js";
 import type { ToolDefinition } from "../tools/types.js";
 
+export interface OllamaProbeResult {
+  reachable: boolean;
+  models: string[];
+}
+
+export async function listOllamaModels(baseUrl = "http://localhost:11434"): Promise<OllamaProbeResult> {
+  const cleanUrl = baseUrl.replace(/\/+$/, "");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1800);
+  timer.unref?.();
+  try {
+    const res = await fetch(`${cleanUrl}/api/tags`, { signal: controller.signal });
+    if (!res.ok) return { reachable: true, models: [] };
+    const data = (await res.json()) as { models?: Array<{ name?: string }> };
+    const models = (data.models || []).map((m) => String(m.name || "")).filter(Boolean);
+    return { reachable: true, models };
+  } catch {
+    return { reachable: false, models: [] };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export class OllamaProvider implements LLMProvider {
   public name = "ollama";
   private baseUrl: string;
-  private model: string;
+  public model: string;
 
   constructor(baseUrl = "http://localhost:11434", model = "deepseek-r1:7b") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -14,7 +37,8 @@ export class OllamaProvider implements LLMProvider {
   async chatStream(
     messages: ChatMessage[],
     tools: ToolDefinition[],
-    onChunk: (chunk: string) => void
+    onChunk: (chunk: string) => void,
+    signal?: AbortSignal
   ): Promise<ProviderResponse> {
     const formattedMessages = messages.map(m => {
       if (m.role === "tool") {
@@ -50,9 +74,15 @@ export class OllamaProvider implements LLMProvider {
       response = await fetch(`${this.baseUrl}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        signal
       });
     } catch (err: any) {
+      if (err?.name === "AbortError" || signal?.aborted) {
+        const abortErr = new Error("Aborted");
+        abortErr.name = "AbortError";
+        throw abortErr;
+      }
       throw new Error(`Failed to connect to Ollama at ${this.baseUrl}: ${err.message}. Is Ollama running?`);
     }
 
@@ -69,35 +99,50 @@ export class OllamaProvider implements LLMProvider {
     const collectedToolCalls: ToolCall[] = [];
     let buffer = "";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    const onAbort = () => {
+      reader.cancel().catch(() => {});
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const parsed = JSON.parse(line);
-          const msg = parsed.message;
-          if (msg?.content) {
-            fullText += msg.content;
-            onChunk(msg.content);
-          }
-          if (msg?.tool_calls) {
-            for (const tc of msg.tool_calls) {
-              collectedToolCalls.push({
-                id: `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                name: tc.function.name,
-                arguments: tc.function.arguments || {}
-              });
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const parsed = JSON.parse(line);
+            const msg = parsed.message;
+            if (msg?.content) {
+              fullText += msg.content;
+              onChunk(msg.content);
             }
+            if (msg?.tool_calls) {
+              for (const tc of msg.tool_calls) {
+                collectedToolCalls.push({
+                  id: `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                  name: tc.function.name,
+                  arguments: tc.function.arguments || {}
+                });
+              }
+            }
+          } catch {
           }
-        } catch {
         }
       }
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+
+    if (signal?.aborted) {
+      const abortErr = new Error("Aborted");
+      abortErr.name = "AbortError";
+      throw abortErr;
     }
 
     return {

@@ -4,12 +4,23 @@ import { runCommandTool } from "./shell.js";
 import { securityScanTool, fuzzEndpointTool, generatePayloadsTool } from "./security.js";
 import { httpRequestTool } from "./http.js";
 import { gitTool } from "./git.js";
+import { dbAuditTool, dbInspectSchemaTool, dbListTool, dbQueryTool } from "./db.js";
 import {
+  browserOpenTool,
   browserNavigateTool,
+  browserSnapshotTool,
   browserClickTool,
   browserTypeTool,
+  browserPressTool,
+  browserHoverTool,
+  browserSelectTool,
+  browserScrollTool,
+  browserWaitTool,
   browserExtractTool,
   browserScreenshotTool,
+  browserConsoleTool,
+  browserCookiesTool,
+  browserEvalTool,
   browserCloseTool
 } from "./browser.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
@@ -26,12 +37,31 @@ export const ALL_TOOLS: Record<string, Tool> = {
   generate_payloads: generatePayloadsTool,
   send_http_request: httpRequestTool,
   git_inspection: gitTool,
+  db_list: dbListTool,
+  db_inspect_schema: dbInspectSchemaTool,
+  db_audit: dbAuditTool,
+  db_query: dbQueryTool,
+  browser_open: browserOpenTool,
   browser_navigate: browserNavigateTool,
+  browser_snapshot: browserSnapshotTool,
   browser_click: browserClickTool,
   browser_type: browserTypeTool,
+  browser_press: browserPressTool,
+  browser_hover: browserHoverTool,
+  browser_select: browserSelectTool,
+  browser_scroll: browserScrollTool,
+  browser_wait: browserWaitTool,
   browser_extract: browserExtractTool,
   browser_screenshot: browserScreenshotTool,
+  browser_console: browserConsoleTool,
+  browser_cookies: browserCookiesTool,
+  browser_eval: browserEvalTool,
   browser_close: browserCloseTool,
+};
+
+const TOOL_ALIASES: Record<string, string> = {
+  browser_fill: "browser_type",
+  browser_open_url: "browser_open"
 };
 
 export async function executeTool(
@@ -39,7 +69,8 @@ export async function executeTool(
   params: Record<string, any>,
   context: ToolExecutionContext
 ): Promise<ToolResult> {
-  const tool = ALL_TOOLS[toolName];
+  const canonicalName = TOOL_ALIASES[toolName] || toolName;
+  const tool = ALL_TOOLS[canonicalName];
   if (!tool) {
     return {
       success: false,

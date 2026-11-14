@@ -51,8 +51,11 @@ async function runTests() {
 
   await import("./decision.test.mjs");
   await import("./browser.test.mjs");
+  await import("./banner.test.mjs");
+  await import("./repl.test.mjs");
+  await import("./database.test.mjs");
 
-  console.log("\nAll 8 test suites passed successfully.");
+  console.log("\nAll 11 test suites passed successfully.");
 }
 
 runTests().catch(err => {

@@ -21,9 +21,11 @@ export interface ProviderResponse {
 
 export interface LLMProvider {
   name: string;
+  model: string;
   chatStream(
     messages: ChatMessage[],
     tools: ToolDefinition[],
-    onChunk: (chunk: string) => void
+    onChunk: (chunk: string) => void,
+    signal?: AbortSignal
   ): Promise<ProviderResponse>;
 }

@@ -2,8 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+export type ProviderName = "gemini" | "ollama" | "claude" | "deepseek" | "openai";
+
 export interface WideConfig {
-  provider: "gemini" | "ollama" | "claude" | "deepseek" | "openai";
+  provider: ProviderName;
   model: string;
   apiKeys: {
     gemini?: string;
@@ -24,10 +26,24 @@ const DEFAULT_CONFIG: WideConfig = {
   apiKeys: {},
   ollamaBaseUrl: "http://localhost:11434",
   autoApproveRead: true,
-  autoApproveWrite: false,
+  autoApproveWrite: true,
   autoApproveRun: false,
   maxIterations: 25,
 };
+
+export function coerceConfigValue(key: string, raw: unknown): unknown {
+  if (typeof raw !== "string") return raw;
+  const trimmed = raw.trim();
+  if (key === "autoApproveRead" || key === "autoApproveWrite" || key === "autoApproveRun") {
+    if (trimmed === "true" || trimmed === "on" || trimmed === "1") return true;
+    if (trimmed === "false" || trimmed === "off" || trimmed === "0") return false;
+  }
+  if (key === "maxIterations") {
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
+  }
+  return raw;
+}
 
 export class ConfigManager {
   private configDir: string;
@@ -41,24 +57,36 @@ export class ConfigManager {
   }
 
   public get(): WideConfig {
-    return { ...this.config };
+    return {
+      ...this.config,
+      apiKeys: { ...(this.config.apiKeys || {}) },
+    };
   }
 
   public set<K extends keyof WideConfig>(key: K, value: WideConfig[K]): void {
-    this.config[key] = value;
+    this.config[key] = coerceConfigValue(String(key), value) as WideConfig[K];
     this.save();
   }
 
   public setApiKey(provider: keyof WideConfig["apiKeys"], key: string): void {
     if (!this.config.apiKeys) this.config.apiKeys = {};
-    this.config.apiKeys[provider] = key;
+    this.config.apiKeys[provider] = key.trim();
     this.save();
   }
 
   public getApiKey(provider: keyof WideConfig["apiKeys"]): string | undefined {
-    return process.env[`WIDE_${provider.toUpperCase()}_API_KEY`] ||
-           process.env[`${provider.toUpperCase()}_API_KEY`] ||
-           this.config.apiKeys?.[provider];
+    const envSpecific = process.env[`WIDE_${provider.toUpperCase()}_API_KEY`];
+    const envStandard =
+      provider === "claude"
+        ? process.env.ANTHROPIC_API_KEY
+        : process.env[`${provider.toUpperCase()}_API_KEY`];
+    return envSpecific || envStandard || this.config.apiKeys?.[provider];
+  }
+
+  public hasProviderCredentials(provider?: ProviderName): boolean {
+    const target = provider || this.config.provider;
+    if (target === "ollama") return true;
+    return Boolean(this.getApiKey(target));
   }
 
   private load(): WideConfig {

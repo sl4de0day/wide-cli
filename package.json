@@ -1,6 +1,6 @@
 {
   "name": "wide-cli",
-  "version": "0.3.101126",
+  "version": "0.4141126",
   "description": "Terminal-first autonomous AI coding & security agent for the Wide ecosystem",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -39,11 +39,15 @@
     "commander": "^13.1.0",
     "diff": "^7.0.0",
     "fast-glob": "^3.3.3",
+    "ioredis": "^6.0.0",
+    "mysql2": "^3.24.6",
+    "pg": "^8.23.1",
     "picocolors": "^1.1.1"
   },
   "devDependencies": {
     "@types/diff": "^7.0.2",
     "@types/node": "^22.13.0",
+    "@types/pg": "^8.23.1",
     "typescript": "^5.7.3"
   },
   "engines": {

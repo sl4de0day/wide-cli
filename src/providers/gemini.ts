@@ -4,7 +4,7 @@ import type { ToolDefinition } from "../tools/types.js";
 export class GeminiProvider implements LLMProvider {
   public name = "gemini";
   private apiKey: string;
-  private model: string;
+  public model: string;
 
   constructor(apiKey: string, model = "gemini-2.5-flash") {
     this.apiKey = apiKey;
@@ -14,7 +14,8 @@ export class GeminiProvider implements LLMProvider {
   async chatStream(
     messages: ChatMessage[],
     tools: ToolDefinition[],
-    onChunk: (chunk: string) => void
+    onChunk: (chunk: string) => void,
+    signal?: AbortSignal
   ): Promise<ProviderResponse> {
     if (!this.apiKey) {
       throw new Error("Gemini API key is not configured. Run 'wide config set-key gemini <YOUR_KEY>' or set GEMINI_API_KEY.");
@@ -87,7 +88,8 @@ export class GeminiProvider implements LLMProvider {
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal
     });
 
     if (!response.ok) {
@@ -103,40 +105,55 @@ export class GeminiProvider implements LLMProvider {
     const collectedToolCalls: ToolCall[] = [];
     let buffer = "";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    const onAbort = () => {
+      reader.cancel().catch(() => {});
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        const jsonStr = line.slice(6).trim();
-        if (!jsonStr) continue;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
 
-        try {
-          const parsed = JSON.parse(jsonStr);
-          const candidate = parsed.candidates?.[0];
-          const parts = candidate?.content?.parts || [];
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const jsonStr = line.slice(6).trim();
+          if (!jsonStr) continue;
 
-          for (const part of parts) {
-            if (part.text) {
-              fullText += part.text;
-              onChunk(part.text);
+          try {
+            const parsed = JSON.parse(jsonStr);
+            const candidate = parsed.candidates?.[0];
+            const parts = candidate?.content?.parts || [];
+
+            for (const part of parts) {
+              if (part.text) {
+                fullText += part.text;
+                onChunk(part.text);
+              }
+              if (part.functionCall) {
+                collectedToolCalls.push({
+                  id: `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                  name: part.functionCall.name,
+                  arguments: part.functionCall.args || {}
+                });
+              }
             }
-            if (part.functionCall) {
-              collectedToolCalls.push({
-                id: `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                name: part.functionCall.name,
-                arguments: part.functionCall.args || {}
-              });
-            }
+          } catch {
           }
-        } catch {
         }
       }
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+
+    if (signal?.aborted) {
+      const abortErr = new Error("Aborted");
+      abortErr.name = "AbortError";
+      throw abortErr;
     }
 
     return {

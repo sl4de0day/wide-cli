@@ -4,7 +4,7 @@ import type { ToolDefinition } from "../tools/types.js";
 export class ClaudeProvider implements LLMProvider {
   public name = "claude";
   private apiKey: string;
-  private model: string;
+  public model: string;
 
   constructor(apiKey: string, model = "claude-3-7-sonnet-20250219") {
     this.apiKey = apiKey;
@@ -14,7 +14,8 @@ export class ClaudeProvider implements LLMProvider {
   async chatStream(
     messages: ChatMessage[],
     tools: ToolDefinition[],
-    onChunk: (chunk: string) => void
+    onChunk: (chunk: string) => void,
+    signal?: AbortSignal
   ): Promise<ProviderResponse> {
     if (!this.apiKey) {
       throw new Error("Anthropic API key is not configured. Run 'wide config set-key claude <YOUR_KEY>' or set ANTHROPIC_API_KEY.");
@@ -86,7 +87,8 @@ export class ClaudeProvider implements LLMProvider {
         "x-api-key": this.apiKey,
         "anthropic-version": "2023-06-01"
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal
     });
 
     if (!res.ok) {
@@ -102,43 +104,58 @@ export class ClaudeProvider implements LLMProvider {
     const toolCallMap = new Map<number, { id: string; name: string; inputStr: string }>();
     let buffer = "";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    const onAbort = () => {
+      reader.cancel().catch(() => {});
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        const jsonStr = line.slice(6).trim();
-        if (!jsonStr || jsonStr === "[DONE]") continue;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
 
-        try {
-          const evt = JSON.parse(jsonStr);
-          if (evt.type === "content_block_start") {
-            if (evt.content_block?.type === "tool_use") {
-              toolCallMap.set(evt.index, {
-                id: evt.content_block.id,
-                name: evt.content_block.name,
-                inputStr: ""
-              });
-            }
-          } else if (evt.type === "content_block_delta") {
-            if (evt.delta?.type === "text_delta") {
-              fullText += evt.delta.text;
-              onChunk(evt.delta.text);
-            } else if (evt.delta?.type === "input_json_delta") {
-              const current = toolCallMap.get(evt.index);
-              if (current) {
-                current.inputStr += evt.delta.partial_json;
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const jsonStr = line.slice(6).trim();
+          if (!jsonStr || jsonStr === "[DONE]") continue;
+
+          try {
+            const evt = JSON.parse(jsonStr);
+            if (evt.type === "content_block_start") {
+              if (evt.content_block?.type === "tool_use") {
+                toolCallMap.set(evt.index, {
+                  id: evt.content_block.id,
+                  name: evt.content_block.name,
+                  inputStr: ""
+                });
+              }
+            } else if (evt.type === "content_block_delta") {
+              if (evt.delta?.type === "text_delta") {
+                fullText += evt.delta.text;
+                onChunk(evt.delta.text);
+              } else if (evt.delta?.type === "input_json_delta") {
+                const current = toolCallMap.get(evt.index);
+                if (current) {
+                  current.inputStr += evt.delta.partial_json;
+                }
               }
             }
+          } catch {
           }
-        } catch {
         }
       }
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+
+    if (signal?.aborted) {
+      const abortErr = new Error("Aborted");
+      abortErr.name = "AbortError";
+      throw abortErr;
     }
 
     const collectedToolCalls: ToolCall[] = [];

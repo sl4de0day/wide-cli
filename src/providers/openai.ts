@@ -4,7 +4,7 @@ import type { ToolDefinition } from "../tools/types.js";
 export class OpenAICompatibleProvider implements LLMProvider {
   public name: string;
   private apiKey: string;
-  private model: string;
+  public model: string;
   private baseUrl: string;
 
   constructor(
@@ -22,7 +22,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
   async chatStream(
     messages: ChatMessage[],
     tools: ToolDefinition[],
-    onChunk: (chunk: string) => void
+    onChunk: (chunk: string) => void,
+    signal?: AbortSignal
   ): Promise<ProviderResponse> {
     if (!this.apiKey) {
       throw new Error(`${this.name.toUpperCase()} API key is not configured. Run 'wide config set-key ${this.name} <YOUR_KEY>'.`);
@@ -79,7 +80,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${this.apiKey}`
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal
     });
 
     if (!res.ok) {
@@ -95,46 +97,61 @@ export class OpenAICompatibleProvider implements LLMProvider {
     const toolCallAccumulators = new Map<number, { id: string; name: string; argsStr: string }>();
     let buffer = "";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    const onAbort = () => {
+      reader.cancel().catch(() => {});
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        const jsonStr = line.slice(6).trim();
-        if (!jsonStr || jsonStr === "[DONE]") continue;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
 
-        try {
-          const parsed = JSON.parse(jsonStr);
-          const delta = parsed.choices?.[0]?.delta;
-          if (delta?.content) {
-            fullText += delta.content;
-            onChunk(delta.content);
-          }
-          if (delta?.tool_calls) {
-            for (const tc of delta.tool_calls) {
-              const idx = tc.index ?? 0;
-              if (!toolCallAccumulators.has(idx)) {
-                toolCallAccumulators.set(idx, {
-                  id: tc.id || `call_${Date.now()}_${idx}`,
-                  name: tc.function?.name || "",
-                  argsStr: tc.function?.arguments || ""
-                });
-              } else {
-                const acc = toolCallAccumulators.get(idx)!;
-                if (tc.id) acc.id = tc.id;
-                if (tc.function?.name) acc.name += tc.function.name;
-                if (tc.function?.arguments) acc.argsStr += tc.function.arguments;
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const jsonStr = line.slice(6).trim();
+          if (!jsonStr || jsonStr === "[DONE]") continue;
+
+          try {
+            const parsed = JSON.parse(jsonStr);
+            const delta = parsed.choices?.[0]?.delta;
+            if (delta?.content) {
+              fullText += delta.content;
+              onChunk(delta.content);
+            }
+            if (delta?.tool_calls) {
+              for (const tc of delta.tool_calls) {
+                const idx = tc.index ?? 0;
+                if (!toolCallAccumulators.has(idx)) {
+                  toolCallAccumulators.set(idx, {
+                    id: tc.id || `call_${Date.now()}_${idx}`,
+                    name: tc.function?.name || "",
+                    argsStr: tc.function?.arguments || ""
+                  });
+                } else {
+                  const acc = toolCallAccumulators.get(idx)!;
+                  if (tc.id) acc.id = tc.id;
+                  if (tc.function?.name) acc.name += tc.function.name;
+                  if (tc.function?.arguments) acc.argsStr += tc.function.arguments;
+                }
               }
             }
+          } catch {
           }
-        } catch {
         }
       }
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+
+    if (signal?.aborted) {
+      const abortErr = new Error("Aborted");
+      abortErr.name = "AbortError";
+      throw abortErr;
     }
 
     const collectedToolCalls: ToolCall[] = [];

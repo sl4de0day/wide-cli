@@ -1,3 +1,14 @@
+export type ApprovalDecision = "once" | "always" | "deny";
+
+export interface ApprovalRequest {
+  tool: string;
+  title: string;
+  detail: string;
+  preview?: string;
+  destructive?: boolean;
+  sessionKey?: string;
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;
@@ -18,6 +29,9 @@ export interface ToolExecutionContext {
   autoApproveRead?: boolean;
   autoApproveWrite?: boolean;
   autoApproveRun?: boolean;
+  signal?: AbortSignal;
+  sessionApprovedTools?: Set<string>;
+  requestApproval?: (request: ApprovalRequest) => Promise<ApprovalDecision>;
 }
 
 export interface ToolResult {
