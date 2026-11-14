@@ -81,6 +81,36 @@ program
     console.log(res.output);
   });
 
+program
+  .command("update")
+  .alias("upgrade")
+  .description("Check for updates and synchronize the Wide CLI and rules to the latest version")
+  .action(async () => {
+    try {
+      console.log(pc.cyan("Synchronizing Wide security rules..."));
+      const ruleResult = await RuleLoader.updateRules();
+      console.log(pc.green(`Synchronized ${ruleResult.count} security rules to ${ruleResult.path}`));
+
+      console.log(pc.cyan("Checking for Wide CLI updates..."));
+      const currentVersion = "0.3.101126";
+      const res = await fetch("https://api.github.com/repos/sl4de0day/wide-cli/releases/latest", {
+        headers: { "User-Agent": "Wide-CLI", Accept: "application/vnd.github+json" }
+      });
+      if (res.ok) {
+        const release = (await res.json()) as any;
+        const latestTag = String(release.tag_name || release.name || "").replace(/^v/i, "");
+        if (latestTag && latestTag !== currentVersion) {
+          console.log(pc.yellow(`New Wide CLI version available: v${latestTag} (current: v${currentVersion})`));
+          console.log(pc.cyan("Run npm install -g wide-cli or download from https://github.com/sl4de0day/wide-cli/releases to update."));
+        } else {
+          console.log(pc.green(`Wide CLI is already up to date (v${currentVersion}).`));
+        }
+      }
+    } catch (err: any) {
+      console.error(pc.red(`Update check failed: ${err.message}`));
+    }
+  });
+
 const rulesCmd = program
   .command("rules")
   .description("Manage and synchronize Wide security rules");
