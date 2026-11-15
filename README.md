@@ -20,13 +20,14 @@
 
 ## Overview
 
-Wide CLI brings the power of Wide's autonomous AI coding and web security agents directly to your terminal. Edit code, debug applications, inspect vulnerabilities, and run security audits without leaving your terminal flow.
+Wide CLI brings the power of Wide's autonomous AI coding, database management, and web security agents directly to your terminal. Edit code, debug applications, inspect databases, and run security audits without leaving your terminal flow.
 
-- **Autonomous AI Coding:** Read files, edit code with colored diff confirmations, run shell commands, and navigate complex codebases.
-- **Native SAST & Security Engine:** Instant vulnerability detection (SQLi, XSS, SSRF, command injection, secret leakage) powered by Wide's inspection engine.
-- **Headless Web Security Workbench:** Trigger HTTP requests, verify patches, and test web API endpoints right from the agent loop.
+- **Autonomous AI Coding:** Read files, edit code with ANSI colored diff confirmations, run shell commands, and navigate complex codebases with lazy startup under 50 ms.
+- **Integrated Database 2.0:** Multi-engine database inspection and querying for SQLite, PostgreSQL, MySQL, and Redis with execution duration, persistent query history, CSV/JSON/SQL data export, and Mermaid ERD generation via `/db` and agent tools.
+- **Real CDP Browser Automation:** Full Chromium/Edge automation across 16 tools with element ref (`@eN`) interaction, screenshot capture, HAR 1.2 traffic export with header redaction, and stealth evasion mode.
+- **Native SAST & Security Engine:** Instant vulnerability detection (SQLi, XSS, SSRF, command injection, secret leakage) backed by SHA256SUMS-verified dynamic rules, offline OSV bundles, and non-destructive AST suppression.
+- **Terminal Ergonomics & Shell Completion:** Interactive persistent REPL with history persistence, session save/resume (`--resume`, `--continue`), shell completion (`wide completion install` for PowerShell, Bash, and Zsh), slash commands, and top-level `wide update` command.
 - **Model Agnostic:** Works seamlessly with local models via **Ollama** (offline, private, 0 telemetry) or cloud APIs (**Gemini**, **Claude**, **DeepSeek**, **OpenAI**).
-- **Minimal & Modern Terminal UX:** Fast streaming output, interactive REPL, slash commands (/scan, /diff, /model), and git-style unified diff approvals.
 
 ## Installation
 
