@@ -65,4 +65,18 @@ assert.strictEqual(barrier.tick(3, 0.6, 5.0, 11.0), true);
 assert.strictEqual(barrier.reachedQuorum, true);
 console.log("[PASS] SynchronizationBarrier quorum check");
 
+const zeroStartBarrier = new SynchronizationBarrier(4);
+assert.strictEqual(zeroStartBarrier.tick(4, 0.8, 2.0, 0.0), false);
+assert.strictEqual(zeroStartBarrier.tick(4, 0.8, 2.0, 1.5), false);
+assert.strictEqual(zeroStartBarrier.tick(4, 0.8, 2.0, 2.0), true);
+assert.strictEqual(zeroStartBarrier.reachedQuorum, false);
+
+const nanScorer = new WeightedScorer(
+  new Criterion(0.5, () => Number.NaN),
+  new Criterion(0.5, () => 0.8)
+);
+assert.ok(Math.abs(nanScorer.score(0) - 0.4) < 1e-9);
+assert.throws(() => new Criterion(Number.NaN, () => 0.5), RangeError);
+console.log("[PASS] DecisionCore t=0 barrier and NaN guards");
+
 console.log("All DecisionCore tests passed successfully.");

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,22 @@ const REMOTE_OSV_URL = "https://raw.githubusercontent.com/sl4de0day/wide-rules/m
 const REMOTE_CHECKSUMS_URL = "https://raw.githubusercontent.com/sl4de0day/wide-rules/main/dist/SHA256SUMS";
 const INSTALL_WIDE_RULES = resolve(dirname(fileURLToPath(import.meta.url)), "../../../wide-rules/dist/rules.json");
 const INSTALL_WIDE_OSV = resolve(dirname(fileURLToPath(import.meta.url)), "../../../wide-rules/dist/osv-bundle.json");
+const rulesFileCache = new Map<string, { mtimeMs: number; size: number; rules: SecurityRule[] }>();
+const sanitizationRegexCache = new Map<string, RegExp>();
+
+function getSanitizationRegex(src: string, flags: string): RegExp {
+  const key = `${flags}:${src}`;
+  let compiled = sanitizationRegexCache.get(key);
+  if (!compiled) {
+    if (sanitizationRegexCache.size >= 256) {
+      const oldest = sanitizationRegexCache.keys().next().value;
+      if (oldest !== undefined) sanitizationRegexCache.delete(oldest);
+    }
+    compiled = new RegExp(src, flags);
+    sanitizationRegexCache.set(key, compiled);
+  }
+  return compiled;
+}
 
 function parseChecksums(raw: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -188,7 +204,7 @@ export class RuleLoader {
         try {
           const src = r.pattern.source;
           const flags = src.includes("\\uD800") ? "g" : "gu";
-          result = result.replace(new RegExp(src, flags), "");
+          result = result.replace(getSanitizationRegex(src, flags), "");
         } catch {}
       }
     }
@@ -249,20 +265,35 @@ export class RuleLoader {
     return true;
   }
 
-  public static async updateRules(): Promise<{ count: number; osvCount: number; path: string; osvPath: string | null }> {
-    mkdirSync(DEFAULT_CACHE_DIR, { recursive: true });
-    let checksums = new Map<string, string>();
-    try {
-      const sumRes = await fetch(REMOTE_CHECKSUMS_URL);
-      if (sumRes.ok) checksums = parseChecksums(await sumRes.text());
-    } catch {}
+  public static async updateRules(options: { verifySha256?: boolean; fetchImpl?: typeof fetch; cacheDir?: string } = {}): Promise<{ count: number; osvCount: number; path: string; osvPath: string | null }> {
+    const cacheDir = options.cacheDir || DEFAULT_CACHE_DIR;
+    const cacheFile = join(cacheDir, "rules.json");
+    const osvFile = join(cacheDir, "osv-bundle.json");
+    const metaFile = join(cacheDir, ".sync-meta.json");
+    const verifySha = options.verifySha256 !== false;
+    const fetchFn = options.fetchImpl || fetch;
 
-    const response = await fetch(REMOTE_RULES_URL);
+    mkdirSync(cacheDir, { recursive: true });
+    let checksums = new Map<string, string>();
+    const sumRes = await fetchFn(REMOTE_CHECKSUMS_URL, { signal: AbortSignal.timeout(15000) });
+    if (!sumRes.ok) {
+      if (verifySha) {
+        throw new Error(`SHA-256 verification required: failed to fetch SHA256SUMS (${sumRes.status})`);
+      }
+    } else {
+      checksums = parseChecksums(await sumRes.text());
+    }
+
+    const expectedRulesSha = checksums.get("rules.json");
+    if (verifySha && !expectedRulesSha) {
+      throw new Error("SHA-256 verification failed: rules.json missing from SHA256SUMS");
+    }
+
+    const response = await fetchFn(REMOTE_RULES_URL, { signal: AbortSignal.timeout(20000) });
     if (!response.ok) {
       throw new Error(`Failed to download rules (${response.status}): ${response.statusText}`);
     }
     const rulesRaw = await response.text();
-    const expectedRulesSha = checksums.get("rules.json");
     if (expectedRulesSha) {
       const actualSha = createHash("sha256").update(rulesRaw).digest("hex");
       if (actualSha !== expectedRulesSha) {
@@ -271,40 +302,46 @@ export class RuleLoader {
     }
     const data = JSON.parse(rulesRaw) as any;
     const rulesList = Array.isArray(data) ? data : (data?.rules || []);
-    writeFileSync(DEFAULT_CACHE_FILE, JSON.stringify(data, null, 2), "utf8");
+    writeFileSync(cacheFile, JSON.stringify(data, null, 2), "utf8");
+    rulesFileCache.delete(cacheFile);
 
     let osvCount = 0;
     let osvPath: string | null = null;
-    try {
-      const osvRes = await fetch(REMOTE_OSV_URL);
-      if (osvRes.ok) {
-        const osvRaw = await osvRes.text();
-        const expectedOsvSha = checksums.get("osv-bundle.json");
-        if (expectedOsvSha) {
-          const actualOsvSha = createHash("sha256").update(osvRaw).digest("hex");
-          if (actualOsvSha !== expectedOsvSha) {
-            throw new Error("SHA-256 mismatch while downloading osv-bundle.json");
-          }
-        }
-        const osvData = JSON.parse(osvRaw) as any;
-        writeFileSync(DEFAULT_OSV_FILE, JSON.stringify(osvData, null, 2), "utf8");
-        osvPath = DEFAULT_OSV_FILE;
-        osvCount = Number(osvData?.stats?.total || 0);
+    const osvRes = await fetchFn(REMOTE_OSV_URL, { signal: AbortSignal.timeout(20000) });
+    if (osvRes.ok) {
+      const osvRaw = await osvRes.text();
+      const expectedOsvSha = checksums.get("osv-bundle.json");
+      if (verifySha && !expectedOsvSha) {
+        throw new Error("SHA-256 verification failed: osv-bundle.json missing from SHA256SUMS");
       }
-    } catch (err) {
-      if (String((err as Error)?.message || "").includes("SHA-256 mismatch")) throw err;
+      if (expectedOsvSha) {
+        const actualOsvSha = createHash("sha256").update(osvRaw).digest("hex");
+        if (actualOsvSha !== expectedOsvSha) {
+          throw new Error("SHA-256 mismatch while downloading osv-bundle.json");
+        }
+      }
+      const osvData = JSON.parse(osvRaw) as any;
+      writeFileSync(osvFile, JSON.stringify(osvData, null, 2), "utf8");
+      osvPath = osvFile;
+      osvCount = Number(osvData?.stats?.total || 0);
     }
 
     writeFileSync(
-      DEFAULT_META_FILE,
+      metaFile,
       JSON.stringify({ syncedAt: new Date().toISOString(), rulesCount: rulesList.length, osvCount }, null, 2),
       "utf8"
     );
-    return { count: rulesList.length, osvCount, path: DEFAULT_CACHE_FILE, osvPath };
+    return { count: rulesList.length, osvCount, path: cacheFile, osvPath };
   }
 
   private static parseRulesFile(filePath: string): SecurityRule[] {
     try {
+      const st = statSync(filePath);
+      const cached = rulesFileCache.get(filePath);
+      if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+        return cached.rules;
+      }
+
       const raw = readFileSync(filePath, "utf8");
       const parsed = JSON.parse(raw);
       const list = Array.isArray(parsed) ? parsed : (parsed?.rules || []);
@@ -332,6 +369,7 @@ export class RuleLoader {
           continue;
         }
       }
+      rulesFileCache.set(filePath, { mtimeMs: st.mtimeMs, size: st.size, rules: result });
       return result;
     } catch {
       return [];

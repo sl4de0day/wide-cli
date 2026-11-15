@@ -1,8 +1,9 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, openSync, readSync, closeSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, openSync, readSync, closeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, extname, join, relative, resolve } from "node:path";
 import pc from "picocolors";
+import { debugLog } from "../config/logger.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
 import { assessSqlRisk, isQueryReadOnly } from "./risk.js";
 
@@ -91,11 +92,18 @@ function getWideDir(): string {
 }
 
 function getOrCreateDbKey(): Buffer {
-  const keyPath = join(getWideDir(), ".db.key");
+  const wideDir = getWideDir();
+  const keyPath = join(wideDir, ".db.key");
   if (existsSync(keyPath)) {
     const raw = readFileSync(keyPath, "utf8").trim();
     const buf = Buffer.from(raw, "hex");
     if (buf.length === 32) return buf;
+    const secretsPath = join(wideDir, "db-secrets.enc");
+    if (existsSync(secretsPath)) {
+      const backupPath = join(wideDir, `.db.key.corrupt.${Date.now()}`);
+      try { copyFileSync(keyPath, backupPath); } catch {}
+      debugLog("db", `Backed up corrupt .db.key to ${backupPath}`);
+    }
   }
   const key = randomBytes(32);
   writeFileSync(keyPath, key.toString("hex"), { encoding: "utf8", mode: 0o600 });
@@ -168,6 +176,56 @@ function saveSecret(id: string, secret?: string): void {
     current[id] = secret;
   }
   writeFileSync(file, encryptSecretsMap(current), { encoding: "utf8", mode: 0o600 });
+}
+
+export interface DbQueryHistoryEntry {
+  id: string;
+  connectionId: string;
+  sql: string;
+  durationMs: number;
+  rowCount: number;
+  error?: string;
+  ranAt: number;
+}
+
+export function loadDbHistory(): DbQueryHistoryEntry[] {
+  const file = join(getWideDir(), "recent-queries.json");
+  if (!existsSync(file)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function clearDbHistory(connectionId?: string): void {
+  const file = join(getWideDir(), "recent-queries.json");
+  if (!connectionId) {
+    writeFileSync(file, "[]", { encoding: "utf8", mode: 0o600 });
+    return;
+  }
+  const filtered = loadDbHistory().filter((item) => item && item.connectionId !== connectionId);
+  writeFileSync(file, JSON.stringify(filtered.slice(0, 50), null, 2), { encoding: "utf8", mode: 0o600 });
+}
+
+function recordDbHistoryEntry(entry: Omit<DbQueryHistoryEntry, "id" | "ranAt">): void {
+  try {
+    const cleanSql = maskDsn(String(entry.sql || "")).trim().slice(0, 8000);
+    if (!cleanSql) return;
+    const item: DbQueryHistoryEntry = {
+      id: `${Date.now()}_${randomBytes(3).toString("hex")}`,
+      connectionId: entry.connectionId,
+      sql: cleanSql,
+      durationMs: entry.durationMs,
+      rowCount: entry.rowCount,
+      ...(entry.error ? { error: maskDsn(entry.error).slice(0, 500) } : {}),
+      ranAt: Date.now(),
+    };
+    const next = [item, ...loadDbHistory().slice(0, 49)];
+    const file = join(getWideDir(), "recent-queries.json");
+    writeFileSync(file, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
+  } catch {}
 }
 
 export function maskDsn(text: string): string {
@@ -361,8 +419,9 @@ async function withDbDriver<T>(
       connectionTimeoutMillis: 8000,
       query_timeout: 20000,
     });
-    await client.connect();
+    client.on?.("error", (err: Error) => debugLog("db:pg", err.message));
     try {
+      await client.connect();
       return await fn({ kind: "postgres", db: client });
     } finally {
       await client.end().catch(() => {});
@@ -403,11 +462,14 @@ async function withDbDriver<T>(
     lazyConnect: true,
     maxRetriesPerRequest: 1,
   });
-  await redis.connect();
+  redis.on?.("error", (err: Error) => debugLog("db:redis", err.message));
   try {
+    await redis.connect();
     return await fn({ kind: "redis", db: redis });
   } finally {
-    try { redis.disconnect(); } catch {}
+    await redis.quit().catch(() => {
+      try { redis.disconnect(); } catch {}
+    });
   }
 }
 
@@ -638,74 +700,92 @@ export async function executeDatabaseQuery(
   }
 
   const start = Date.now();
-  return withDbDriver(meta, secret, async ({ kind, db }) => {
-    if (kind === "redis") {
-      const parts = splitShellLikeArgs(query);
-      const cmd = parts[0]?.toLowerCase();
-      if (!cmd) throw new Error("Empty Redis command.");
-      const raw = await db.call(cmd, ...parts.slice(1));
-      const rows = Array.isArray(raw)
-        ? raw.slice(0, maxRows).map((val, index) => ({ index, value: typeof val === "object" ? JSON.stringify(val) : String(val ?? "") }))
-        : [{ result: typeof raw === "object" && raw !== null ? JSON.stringify(raw) : String(raw ?? "OK") }];
-      return {
-        columns: Object.keys(rows[0] || { result: "" }),
-        rows,
-        rowCount: rows.length,
-        elapsedMs: Date.now() - start,
-        truncated: Array.isArray(raw) && raw.length > maxRows,
-      };
-    }
+  try {
+    const result = await withDbDriver(meta, secret, async ({ kind, db }) => {
+      if (kind === "redis") {
+        const parts = splitShellLikeArgs(query);
+        const cmd = parts[0]?.toLowerCase();
+        if (!cmd) throw new Error("Empty Redis command.");
+        const raw = await db.call(cmd, ...parts.slice(1));
+        const rows = Array.isArray(raw)
+          ? raw.slice(0, maxRows).map((val, index) => ({ index, value: typeof val === "object" ? JSON.stringify(val) : String(val ?? "") }))
+          : [{ result: typeof raw === "object" && raw !== null ? JSON.stringify(raw) : String(raw ?? "OK") }];
+        return {
+          columns: Object.keys(rows[0] || { result: "" }),
+          rows,
+          rowCount: rows.length,
+          elapsedMs: Date.now() - start,
+          truncated: Array.isArray(raw) && raw.length > maxRows,
+        };
+      }
 
-    if (kind === "sqlite") {
-      const trimmed = query.trim();
-      if (isQueryReadOnly(trimmed, "sqlite") && !trimmed.includes(";")) {
-        const stmt = db.prepare(trimmed);
-        const rawRows = stmt.all();
+      if (kind === "sqlite") {
+        const trimmed = query.trim();
+        if (isQueryReadOnly(trimmed, "sqlite") && !trimmed.includes(";")) {
+          const stmt = db.prepare(trimmed);
+          const rawRows = stmt.all();
+          const truncated = rawRows.length > maxRows;
+          const sliced = truncated ? rawRows.slice(0, maxRows) : rawRows;
+          const { columns, rows } = normalizeRows(sliced);
+          return { columns, rows, rowCount: rows.length, elapsedMs: Date.now() - start, truncated };
+        }
+        db.exec(trimmed);
+        let changes = 0;
+        try {
+          const ch = db.prepare("SELECT changes() AS changes").get() as any;
+          changes = Number(ch?.changes ?? 0);
+        } catch {}
+        return { columns: [], rows: [], rowCount: 0, changes, elapsedMs: Date.now() - start };
+      }
+
+      if (kind === "postgres") {
+        const res = await db.query(query);
+        const rawRows = Array.isArray(res.rows) ? res.rows : [];
         const truncated = rawRows.length > maxRows;
         const sliced = truncated ? rawRows.slice(0, maxRows) : rawRows;
         const { columns, rows } = normalizeRows(sliced);
+        return {
+          columns: columns.length ? columns : (res.fields || []).map((f: any) => String(f.name)),
+          rows,
+          rowCount: rows.length,
+          changes: typeof res.rowCount === "number" && rows.length === 0 ? res.rowCount : undefined,
+          elapsedMs: Date.now() - start,
+          truncated,
+        };
+      }
+
+      const [res] = await db.query(query);
+      if (Array.isArray(res)) {
+        const truncated = res.length > maxRows;
+        const sliced = truncated ? res.slice(0, maxRows) : res;
+        const { columns, rows } = normalizeRows(sliced);
         return { columns, rows, rowCount: rows.length, elapsedMs: Date.now() - start, truncated };
       }
-      db.exec(trimmed);
-      let changes = 0;
-      try {
-        const ch = db.prepare("SELECT changes() AS changes").get() as any;
-        changes = Number(ch?.changes ?? 0);
-      } catch {}
-      return { columns: [], rows: [], rowCount: 0, changes, elapsedMs: Date.now() - start };
-    }
-
-    if (kind === "postgres") {
-      const res = await db.query(query);
-      const rawRows = Array.isArray(res.rows) ? res.rows : [];
-      const truncated = rawRows.length > maxRows;
-      const sliced = truncated ? rawRows.slice(0, maxRows) : rawRows;
-      const { columns, rows } = normalizeRows(sliced);
       return {
-        columns: columns.length ? columns : (res.fields || []).map((f: any) => String(f.name)),
-        rows,
-        rowCount: rows.length,
-        changes: typeof res.rowCount === "number" && rows.length === 0 ? res.rowCount : undefined,
+        columns: [],
+        rows: [],
+        rowCount: 0,
+        changes: Number((res as any)?.affectedRows ?? 0),
         elapsedMs: Date.now() - start,
-        truncated,
       };
-    }
-
-    const [result] = await db.query(query);
-    if (Array.isArray(result)) {
-      const truncated = result.length > maxRows;
-      const sliced = truncated ? result.slice(0, maxRows) : result;
-      const { columns, rows } = normalizeRows(sliced);
-      return { columns, rows, rowCount: rows.length, elapsedMs: Date.now() - start, truncated };
-    }
-    return {
-      columns: [],
-      rows: [],
+    });
+    recordDbHistoryEntry({
+      connectionId: meta.id,
+      sql: query,
+      durationMs: result.elapsedMs,
+      rowCount: result.columns.length > 0 ? result.rowCount : Number(result.changes ?? 0),
+    });
+    return result;
+  } catch (err: any) {
+    recordDbHistoryEntry({
+      connectionId: meta.id,
+      sql: query,
+      durationMs: Date.now() - start,
       rowCount: 0,
-      changes: Number((result as any)?.affectedRows ?? 0),
-      elapsedMs: Date.now() - start,
-    };
-  });
+      error: err?.message || String(err),
+    });
+    throw err;
+  }
 }
 
 function classifyPasswordSample(val: unknown): "weak_plain_or_short" | "weak_md5" | "weak_sha1" | "strong" | "skip" {
@@ -992,6 +1072,80 @@ function formatSchemaText(schema: DbSchemaResult): string {
   return lines.join("\n");
 }
 
+function escapeCsvCell(val: unknown): string {
+  if (val === null || val === undefined) return "";
+  const raw = typeof val === "object" ? JSON.stringify(val) : String(val);
+  if (/[",\r\n]/.test(raw)) {
+    return `"${raw.replace(/"/g, '""')}"`;
+  }
+  return raw;
+}
+
+function escapeSqlLiteral(val: unknown): string {
+  if (val === null || val === undefined) return "NULL";
+  if (typeof val === "number") return Number.isFinite(val) ? String(val) : "NULL";
+  if (typeof val === "boolean") return val ? "TRUE" : "FALSE";
+  const raw = typeof val === "object" ? JSON.stringify(val) : String(val);
+  return `'${raw.replace(/'/g, "''")}'`;
+}
+
+function quoteExportIdent(ident: string, kind: DbKind = "sqlite"): string {
+  return kind === "mysql" ? `\`${ident.replace(/`/g, "``")}\`` : quoteSqliteIdent(ident);
+}
+
+export function exportDbData(
+  format: "csv" | "json" | "sql",
+  tableName: string,
+  columns: string[],
+  rows: Record<string, unknown>[],
+  kind: DbKind = "sqlite"
+): string {
+  if (format === "json") {
+    return JSON.stringify(rows, null, 2);
+  }
+  const cols = columns.length > 0 ? columns : (rows[0] ? Object.keys(rows[0]) : []);
+  if (format === "csv") {
+    const header = cols.map((c) => escapeCsvCell(c)).join(",");
+    const body = rows.map((row) => cols.map((c) => escapeCsvCell(row[c])).join(","));
+    return [header, ...body].join("\n");
+  }
+  if (cols.length === 0 || rows.length === 0) return "";
+  const qTable = quoteExportIdent(tableName || "query_result", kind);
+  const qCols = cols.map((c) => quoteExportIdent(c, kind)).join(", ");
+  return rows
+    .map((row) => `INSERT INTO ${qTable} (${qCols}) VALUES (${cols.map((c) => escapeSqlLiteral(row[c])).join(", ")});`)
+    .join("\n");
+}
+
+export function formatSchemaMermaidEr(schema: DbSchemaResult): string {
+  if (schema.kind === "redis") {
+    return `erDiagram\n  REDIS_STORE {\n    string database "${schema.target}"\n  }`;
+  }
+  const lines: string[] = ["erDiagram"];
+  const fkColsByTable = new Map<string, Set<string>>();
+  for (const table of schema.tables) {
+    const fromIdent = table.name.replace(/[^a-zA-Z0-9_]/g, "_") || "table";
+    for (const fk of table.foreignKeys) {
+      if (!fkColsByTable.has(table.name)) fkColsByTable.set(table.name, new Set());
+      fkColsByTable.get(table.name)!.add(fk.column);
+      const toIdent = fk.refTable.replace(/[^a-zA-Z0-9_]/g, "_") || "table";
+      lines.push(`  ${fromIdent} }o--|| ${toIdent} : "${fk.column} -> ${fk.refColumn}"`);
+    }
+  }
+  for (const table of schema.tables) {
+    const tIdent = table.name.replace(/[^a-zA-Z0-9_]/g, "_") || "table";
+    lines.push(`  ${tIdent} {`);
+    for (const col of table.columns) {
+      const cType = (col.type || "TEXT").replace(/[^a-zA-Z0-9_]/g, "_");
+      const cName = col.name.replace(/[^a-zA-Z0-9_]/g, "_");
+      const badges = [col.primaryKey ? "PK" : "", fkColsByTable.get(table.name)?.has(col.name) ? "FK" : ""].filter(Boolean).join(",");
+      lines.push(`    ${cType} ${cName}${badges ? ` ${badges}` : ""}`);
+    }
+    lines.push("  }");
+  }
+  return lines.join("\n");
+}
+
 export async function handleDbCommand(
   trimmedLine: string,
   ctx: { workingDirectory: string; ask: (prompt: string) => Promise<string> }
@@ -1006,7 +1160,10 @@ export async function handleDbCommand(
     console.log(`  ${pc.cyan("/db use <id|name>")}                           Set active database connection`);
     console.log(`  ${pc.cyan("/db remove <id|name>")}                        Remove saved database connection`);
     console.log(`  ${pc.cyan("/db schema [id|path]")}                        Inspect tables, columns & foreign keys`);
+    console.log(`  ${pc.cyan("/db erd [id|path]")}                           Print Mermaid ER diagram from schema`);
     console.log(`  ${pc.cyan('/db query [id|path] "<sql>"')}                 Run SQL / Redis query (risk-gated)`);
+    console.log(`  ${pc.cyan('/db export [id|path] <csv|json|sql> "<sql>" [--out file]')}`);
+    console.log(`  ${pc.cyan("/db history [clear]")}                         Inspect or clear query history`);
     console.log(`  ${pc.cyan("/db audit [id|path]")}                         Audit PII, weak hashes & TLS hygiene\n`);
     return;
   }
@@ -1209,6 +1366,89 @@ export async function handleDbCommand(
     return;
   }
 
+  if (sub === "history") {
+    const action = (args[2] || "").toLowerCase();
+    if (action === "clear") {
+      clearDbHistory();
+      console.log(`${pc.green("[OK]")} Cleared database query history.\n`);
+      return;
+    }
+    const items = loadDbHistory();
+    console.log(`\n${pc.bold("Recent Database Queries:")}`);
+    if (items.length === 0) {
+      console.log(pc.dim("  (no recent queries recorded)\n"));
+      return;
+    }
+    for (const item of items.slice(0, 20)) {
+      const status = item.error ? pc.red("ERR") : pc.green(`${item.rowCount} row(s)`);
+      const ts = new Date(item.ranAt).toISOString().replace("T", " ").slice(0, 19);
+      console.log(`  ${pc.dim(ts)} ${pc.cyan(item.connectionId)} ${status} ${pc.dim(`${item.durationMs}ms`)} -> ${item.sql}`);
+    }
+    console.log("");
+    return;
+  }
+
+  if (sub === "erd" || sub === "diagram") {
+    try {
+      const { meta, secret } = resolveTargetConnection(args[2], ctx.workingDirectory);
+      const schema = await inspectDatabaseSchema(meta, secret);
+      console.log(`\n${formatSchemaMermaidEr(schema)}\n`);
+    } catch (err: any) {
+      console.log(`${pc.red("Error:")} ${maskDsn(err?.message || String(err))}\n`);
+    }
+    return;
+  }
+
+  if (sub === "export") {
+    const rest = args.slice(2);
+    let outPath: string | undefined;
+    const positional: string[] = [];
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === "--out" && rest[i + 1]) {
+        outPath = rest[++i];
+      } else {
+        positional.push(rest[i]);
+      }
+    }
+    const fmtIdx = positional.findIndex((tok) => {
+      const low = tok.toLowerCase();
+      return low === "csv" || low === "json" || low === "sql";
+    });
+    if (fmtIdx < 0 || !positional[fmtIdx + 1]) {
+      console.log(`Usage: ${pc.cyan('/db export [id|path] <csv|json|sql> "<sql>" [--out file]')}\n`);
+      return;
+    }
+    const connRef = fmtIdx > 0 ? positional[0] : undefined;
+    const fmt = positional[fmtIdx].toLowerCase() as "csv" | "json" | "sql";
+    const sql = positional.slice(fmtIdx + 1).join(" ").trim();
+    try {
+      const { meta, secret } = resolveTargetConnection(connRef, ctx.workingDirectory);
+      if (!isQueryReadOnly(sql, meta.kind)) {
+        console.log(`${pc.red("[BLOCKED]")} Export only permits read-only SELECT queries.\n`);
+        return;
+      }
+      const res = await executeDatabaseQuery(meta, secret, sql, 5000);
+      const tableMatch = sql.match(/\bFROM\s+[`"\[]?([a-zA-Z0-9_.]+)[`"\]]?/i);
+      const tableName = tableMatch ? tableMatch[1].split(".").pop() || "query_result" : "query_result";
+      const content = exportDbData(fmt, tableName, res.columns, res.rows, meta.kind);
+      if (outPath) {
+        const target = resolve(ctx.workingDirectory, outPath);
+        const rel = relative(ctx.workingDirectory, target);
+        if (rel.startsWith("..") || rel === "") {
+          console.log(`${pc.red("Error:")} Export path must stay inside workspace.\n`);
+          return;
+        }
+        writeFileSync(target, content, "utf8");
+        console.log(`${pc.green("[OK]")} Exported ${res.rowCount} row(s) (${fmt.toUpperCase()}) -> ${target}\n`);
+      } else {
+        console.log(`\n${content}\n`);
+      }
+    } catch (err: any) {
+      console.log(`${pc.red("Error:")} ${maskDsn(err?.message || String(err))}\n`);
+    }
+    return;
+  }
+
   console.log(`${pc.yellow("[WARN]")} Unknown /db subcommand '${sub}'. Run ${pc.cyan("/db help")} for usage.\n`);
 }
 
@@ -1369,6 +1609,49 @@ export const dbQueryTool: Tool = {
           changes: res.changes,
           elapsedMs: res.elapsedMs,
         }, null, 2),
+        truncated: res.truncated,
+      };
+    } catch (err: any) {
+      return { success: false, output: "", error: maskDsn(err?.message || String(err)) };
+    }
+  },
+};
+
+export const dbExportTool: Tool = {
+  definition: {
+    name: "db_export",
+    description: "Export rows from a read-only SQL query to CSV, JSON, or SQL INSERT format with secret column redaction.",
+    parameters: {
+      type: "object",
+      properties: {
+        connection: { type: "string", description: "Saved connection id/name or SQLite file path (optional if an active connection is configured)." },
+        query: { type: "string", description: "Read-only SELECT SQL query." },
+        format: { type: "string", description: "Output format: csv, json, or sql.", enum: ["csv", "json", "sql"] },
+        tableName: { type: "string", description: "Target table name for SQL INSERT statements (default query_result)." },
+        maxRows: { type: "number", description: "Maximum number of rows to export (default 1000, max 5000)." },
+      },
+      required: ["query", "format"],
+    },
+  },
+  async execute(params: Record<string, any>, context: ToolExecutionContext): Promise<ToolResult> {
+    const query = String(params.query || "").trim();
+    const fmt = String(params.format || "csv").toLowerCase();
+    if (!query || (fmt !== "csv" && fmt !== "json" && fmt !== "sql")) {
+      return { success: false, output: "", error: "db_export requires query and format (csv|json|sql)." };
+    }
+    try {
+      const { meta, secret } = resolveTargetConnection(params.connection, context.workingDirectory);
+      if (!isQueryReadOnly(query, meta.kind)) {
+        return { success: false, output: "", error: "db_export only permits read-only SELECT queries." };
+      }
+      const limit = Math.min(5000, Math.max(1, Number(params.maxRows || 1000)));
+      const res = await executeDatabaseQuery(meta, secret, query, limit);
+      const redactedRows = redactRowsForAi(res.columns, res.rows);
+      const tableName = String(params.tableName || "query_result").trim() || "query_result";
+      const content = exportDbData(fmt, tableName, res.columns, redactedRows, meta.kind);
+      return {
+        success: true,
+        output: content,
         truncated: res.truncated,
       };
     } catch (err: any) {

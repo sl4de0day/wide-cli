@@ -1,7 +1,9 @@
 import fg from "fast-glob";
-import { readdirSync, statSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { resolve, relative, join } from "node:path";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
+
+const MAX_SEARCH_FILE_BYTES = 1024 * 1024;
 
 export const listDirTool: Tool = {
   definition: {
@@ -19,6 +21,9 @@ export const listDirTool: Tool = {
   async execute(params, context): Promise<ToolResult> {
     try {
       const targetPath = resolve(context.workingDirectory, params.path || ".");
+      if (!existsSync(targetPath) || !statSync(targetPath).isDirectory()) {
+        return { success: false, output: "", error: `Directory not found: ${params.path || "."}` };
+      }
       const maxDepth = params.maxDepth || 1;
 
       const entries: string[] = [];
@@ -33,8 +38,12 @@ export const listDirTool: Tool = {
             entries.push(`[DIR]  ${rel}/`);
             traverse(full, currentDepth + 1);
           } else {
-            const size = statSync(full).size;
-            entries.push(`[FILE] ${rel} (${size} B)`);
+            try {
+              const size = statSync(full).size;
+              entries.push(`[FILE] ${rel} (${size} B)`);
+            } catch {
+              entries.push(`[FILE] ${rel} (unreadable)`);
+            }
           }
         }
       };
@@ -73,7 +82,12 @@ export const searchFilesTool: Tool = {
         dot: false
       });
 
-      const regex = new RegExp(params.pattern, "i");
+      let regex: RegExp;
+      try {
+        regex = new RegExp(params.pattern, "i");
+      } catch (reErr: any) {
+        return { success: false, output: "", error: `Invalid search pattern: ${reErr?.message || String(reErr)}` };
+      }
       const matches: string[] = [];
       let totalMatches = 0;
 
@@ -81,11 +95,17 @@ export const searchFilesTool: Tool = {
         if (totalMatches >= 100) break;
         const full = resolve(context.workingDirectory, file);
         try {
-          const content = readFileSync(full, "utf8");
+          const st = statSync(full);
+          if (st.size > MAX_SEARCH_FILE_BYTES) continue;
+          const buf = readFileSync(full);
+          if (buf.subarray(0, Math.min(buf.length, 2048)).includes(0)) continue;
+          const content = buf.toString("utf8");
           const lines = content.split("\n");
           for (let i = 0; i < lines.length; i++) {
-            if (regex.test(lines[i])) {
-              matches.push(`${file}:${i + 1}: ${lines[i].trim()}`);
+            const line = lines[i];
+            if (line.length > 2000) continue;
+            if (regex.test(line)) {
+              matches.push(`${file}:${i + 1}: ${line.trim()}`);
               totalMatches++;
               if (totalMatches >= 100) break;
             }

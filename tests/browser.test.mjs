@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { HeadlessBrowserController } from "../dist/tools/browser.js";
+import { HeadlessBrowserController, stripBrowserEmojis } from "../dist/tools/browser.js";
 import { executeTool, ALL_TOOLS } from "../dist/tools/index.js";
 
 async function runBrowserTests() {
@@ -25,6 +25,7 @@ async function runBrowserTests() {
     "browser_console",
     "browser_cookies",
     "browser_eval",
+    "browser_export_har",
     "browser_close"
   ];
   for (const name of expectedBrowserTools) {
@@ -153,13 +154,59 @@ async function runBrowserTests() {
       const cookieGet = await executeTool("browser_cookies", { action: "get" }, { workingDirectory: tmpWorkDir });
       assert.ok(cookieGet.output.includes("wide_sid"));
 
-      console.log("[PASS] Real Chromium/Edge CDP browser lifecycle (@eN refs, click, type, eval, console, screenshot, cookies)");
+      const harRes = await executeTool("browser_export_har", {}, { workingDirectory: tmpWorkDir });
+      assert.strictEqual(harRes.success, true);
+      const harObj = JSON.parse(harRes.output);
+      assert.strictEqual(harObj?.log?.version, "1.2");
+      assert.ok(Array.isArray(harObj?.log?.entries));
+
+      await executeTool("browser_close", {}, { workingDirectory: tmpWorkDir });
+      const stealthOpen = await executeTool("browser_open", { url: baseUrl, stealth: true }, { workingDirectory: tmpWorkDir });
+      assert.strictEqual(stealthOpen.success, true);
+      const webdriverRes = await executeTool("browser_eval", { script: "String(navigator.webdriver)" }, { workingDirectory: tmpWorkDir });
+      assert.strictEqual(webdriverRes.success, true);
+      assert.ok(!webdriverRes.output.includes("true"), `Expected stealth navigator.webdriver not to be true, got ${webdriverRes.output}`);
+
+      console.log("[PASS] Real Chromium/Edge CDP browser lifecycle (@eN refs, click, type, eval, console, screenshot, cookies, HAR 1.2, stealth)");
     } finally {
       await executeTool("browser_close", {}, { workingDirectory: tmpWorkDir });
       await new Promise((r) => setTimeout(r, 150));
       await new Promise((r) => server.close(r));
       fs.rmSync(tmpWorkDir, { recursive: true, force: true });
     }
+  }
+
+  assert.strictEqual(stripBrowserEmojis("\uD83D\uDE80 Wide \u2B50 Dashboard"), "Wide Dashboard");
+  const emojiParsed = ctrl.parseHtml("<title>\uD83D\uDE80 Launch Portal \u2728</title><h1>Hi</h1>");
+  assert.strictEqual(emojiParsed.title, "Launch Portal");
+  console.log("[PASS] Emoji stripping in CLI browser titles");
+
+  process.env.WIDE_CLI_BROWSER_HTTP_ONLY = "1";
+  try {
+    const harServer = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "secret_session=xyz" });
+      res.end("<html><head><title>\uD83D\uDE80 HAR Title</title></head><body>ok</body></html>");
+    });
+    await new Promise((resolvePromise) => harServer.listen(0, "127.0.0.1", resolvePromise));
+    try {
+      const addr = harServer.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      const httpCtrl = new HeadlessBrowserController();
+      await httpCtrl.open(`http://127.0.0.1:${port}/?token=demo`, { stealth: true });
+      const snapTxt = await httpCtrl.snapshot();
+      assert.ok(snapTxt.includes("Page Title: HAR Title"));
+      const har = httpCtrl.exportHar();
+      assert.strictEqual(har.log.version, "1.2");
+      assert.strictEqual(har.log.entries.length, 1);
+      const setCookieHdr = har.log.entries[0].response.headers.find((h) => h.name.toLowerCase() === "set-cookie");
+      assert.strictEqual(setCookieHdr?.value, "[REDACTED]");
+      httpCtrl.close();
+      console.log("[PASS] HTTP fallback HAR 1.2 export with header redaction");
+    } finally {
+      await new Promise((r) => harServer.close(r));
+    }
+  } finally {
+    delete process.env.WIDE_CLI_BROWSER_HTTP_ONLY;
   }
 
   console.log("All Browser tests passed successfully.\n");

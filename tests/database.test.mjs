@@ -1,10 +1,10 @@
 import assert from "node:assert";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { executeTool } from "../dist/tools/index.js";
-import { handleDbCommand, maskDsn, parseConnectionTarget } from "../dist/tools/db.js";
+import { clearDbHistory, exportDbData, formatSchemaMermaidEr, handleDbCommand, inspectDatabaseSchema, loadDbHistory, maskDsn, parseConnectionTarget } from "../dist/tools/db.js";
 import { assessSqlRisk, isQueryReadOnly } from "../dist/tools/risk.js";
 
 async function runDatabaseTests() {
@@ -128,6 +128,39 @@ async function runDatabaseTests() {
     assert.ok(auditJson.findings.some((f) => f.category === "weak-credential-storage" && f.severity === "CRITICAL"));
     assert.ok(auditJson.findings.some((f) => f.category === "pii-discovery"));
     console.log("[PASS] db_audit weak hash & PII detection");
+
+    const histBefore = loadDbHistory();
+    assert.ok(histBefore.some((h) => h.sql.includes("SELECT id, email, password_hash, api_token FROM users")));
+    assert.strictEqual(typeof histBefore[0].durationMs, "number");
+
+    const exportCsvRes = await executeTool(
+      "db_export",
+      { connection: "rodb", query: "SELECT id, email, password_hash FROM users", format: "csv", tableName: "users" },
+      { workingDirectory: tempWs }
+    );
+    assert.strictEqual(exportCsvRes.success, true);
+    assert.ok(exportCsvRes.output.includes("alice@example.com"));
+    assert.ok(exportCsvRes.output.includes("[REDACTED]"));
+
+    const exportSqlStr = exportDbData("sql", "users", ["id", "email"], [{ id: 1, email: "o'malley@example.com" }], "sqlite");
+    assert.ok(exportSqlStr.includes("INSERT INTO"));
+    assert.ok(exportSqlStr.includes("o''malley@example.com"));
+
+    await handleDbCommand(`/db export rodb csv "SELECT id, email FROM users" --out exported.csv`, {
+      workingDirectory: tempWs,
+      ask: async () => "n",
+    });
+    assert.ok(existsSync(join(tempWs, "exported.csv")));
+    assert.ok(readFileSync(join(tempWs, "exported.csv"), "utf8").includes("alice@example.com"));
+
+    const erdTarget = parseConnectionTarget(dbPath, tempWs, { name: "erdcheck", readOnly: true });
+    const erdSchema = await inspectDatabaseSchema(erdTarget.meta, erdTarget.secret);
+    const mermaid = formatSchemaMermaidEr(erdSchema);
+    assert.ok(mermaid.includes("erDiagram"));
+    assert.ok(mermaid.includes("orders }o--|| users"));
+    clearDbHistory();
+    assert.strictEqual(loadDbHistory().length, 0);
+    console.log("[PASS] db history, CSV/JSON/SQL export, and Mermaid ERD generation");
 
     await handleDbCommand(`/db connect ${dbPath} --name rwdb --env local`, {
       workingDirectory: tempWs,

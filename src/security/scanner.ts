@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve, relative, extname } from "node:path";
 import fg from "fast-glob";
 import pc from "picocolors";
@@ -88,6 +88,8 @@ export class SecurityScanner {
     };
 
     const minRank = minSeverity === "ALL" ? 1 : severityRanks[minSeverity] || 1;
+    const filteredBySeverity = activeRules.filter(r => severityRanks[r.severity] >= minRank);
+    const rulesByLang = new Map<string, SecurityRule[]>();
 
     for (const file of files) {
       const fullFilePath = resolve(fullTarget, file);
@@ -96,22 +98,29 @@ export class SecurityScanner {
 
       let content = "";
       try {
-        content = readFileSync(fullFilePath, "utf8");
+        const st = statSync(fullFilePath);
+        if (st.size > 2 * 1024 * 1024) continue;
+        const buf = readFileSync(fullFilePath);
+        if (buf.subarray(0, Math.min(buf.length, 2048)).includes(0)) continue;
+        content = buf.toString("utf8");
       } catch {
         continue;
       }
 
       const lines = content.split("\n");
-      const applicableRules = activeRules.filter(r => 
-        r.languages.includes("all") || r.languages.includes(lang)
-      );
+      let applicableRules = rulesByLang.get(lang);
+      if (!applicableRules) {
+        applicableRules = filteredBySeverity.filter(r =>
+          r.languages.includes("all") || r.languages.includes(lang)
+        );
+        rulesByLang.set(lang, applicableRules);
+      }
 
       for (let i = 0; i < lines.length; i++) {
         const lineText = lines[i];
         if (lineText.length > 1000) continue;
 
         for (const rule of applicableRules) {
-          if (severityRanks[rule.severity] < minRank) continue;
 
           if (rule.pattern.test(lineText)) {
             if (rule.notMatch && rule.notMatch.test(lineText)) continue;

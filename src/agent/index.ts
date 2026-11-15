@@ -1,5 +1,6 @@
 import pc from "picocolors";
 import { configManager } from "../config/index.js";
+import { debugLog } from "../config/logger.js";
 import { createOptionalProvider, type ChatMessage, type LLMProvider } from "../providers/index.js";
 import { RuleLoader } from "../security/loader.js";
 import { type SecurityRule } from "../security/rules.js";
@@ -171,6 +172,7 @@ export class Agent {
     const callCounts = new Map<string, number>();
     let iteration = 0;
     let finalAssistantText = "";
+    let incompleteToolLoop = false;
 
     try {
       while (iteration < cfg.maxIterations) {
@@ -178,7 +180,9 @@ export class Agent {
           throw Object.assign(new Error("Aborted"), { name: "AbortError" });
         }
         iteration++;
+        incompleteToolLoop = false;
         this.messages = this.contextManager.compactMessages(this.messages);
+        debugLog("agent", `iteration=${iteration}/${cfg.maxIterations} messages=${this.messages.length}`);
 
         spinner.start("Wide thinking...");
 
@@ -232,6 +236,7 @@ export class Agent {
         if (!response.toolCalls || response.toolCalls.length === 0) {
           break;
         }
+        incompleteToolLoop = true;
 
         for (const tc of response.toolCalls) {
           if (options.signal?.aborted) {
@@ -294,6 +299,13 @@ export class Agent {
             content: toolOutput
           });
         }
+      }
+      if (incompleteToolLoop && iteration >= cfg.maxIterations) {
+        const warnText = `Reached maximum tool iterations (${cfg.maxIterations}); stopping execution loop.`;
+        console.log(`\n${pc.yellow("[WARN]")} ${warnText}`);
+        finalAssistantText = finalAssistantText
+          ? `${finalAssistantText}\n\n[WARN] ${warnText}`
+          : `[WARN] ${warnText}`;
       }
     } catch (err: any) {
       spinner.stop(true);

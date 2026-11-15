@@ -247,7 +247,7 @@ export const DEFAULT_AGENT_RULES: SecurityRule[] = [
     category: "AI_SECURITY",
     severity: "HIGH",
     languages: ["js", "jsx", "ts", "tsx", "py", "mjs", "cjs"],
-    pattern: /\b(?:prompt|instruction|query|input)\s*[:=]\s*(?:f?["'].*?\{|`.*?$\{).*(?:req\.|params\.|body\.|userInput|user_input|request\.)/i,
+    pattern: /\b(?:prompt|instruction|query|input)\s*[:=]\s*(?:f?["'].*?\{|`.*?\$\{).*(?:req\.|params\.|body\.|userInput|user_input|request\.)/i,
     message: "Untrusted user input concatenated directly into LLM prompt template without sanitization.",
     remediation: "Use structured multi-turn message roles or sanitize prompt inputs before sending to the model.",
     instruction: "Always validate and sanitize untrusted user input before incorporating into prompt templates."
@@ -258,7 +258,7 @@ export const DEFAULT_AGENT_RULES: SecurityRule[] = [
     category: "AI_SECURITY",
     severity: "CRITICAL",
     languages: ["js", "jsx", "ts", "tsx", "py", "mjs", "cjs"],
-    pattern: /\b(?:eval|Function|vm\.runInContext|compile)\s*\(\s*(?:toolOutput|tool_output|response\.text|aiResult|ai_output|completion)/i,
+    pattern: /\b(?:eval|Function|vm\.runInContext|compile)\s*\(\s*(?:(?:model|ai|agent|llm)Response|suggestedCode|candidatePatch|toolArgs|toolOutput|tool_output|response\.text|aiResult|ai_output|completion)\b/i,
     message: "Evaluating raw executable code returned by LLM without sandboxing or static verification.",
     remediation: "Parse responses into structured abstract syntax trees or validate against a strict AST schema before execution.",
     instruction: "Never evaluate raw executable code dynamically without AST schema validation or sandboxing."
@@ -269,7 +269,7 @@ export const DEFAULT_AGENT_RULES: SecurityRule[] = [
     category: "AI_SECURITY",
     severity: "HIGH",
     languages: ["js", "jsx", "ts", "tsx", "py", "mjs", "cjs"],
-    pattern: /\b(?:registerMcpServer|addMcpServer|mcpClient\.connect)\s*\(\s*(?:url|endpoint|serverConfig)\s*\)/i,
+    pattern: /\b(?:(?:mcp|toolRegistry)\.(?:register|addServer|connect)\s*\(\s*(?:req\.|params\.|untrusted|remoteUrl|url|endpoint|serverConfig)|(?:registerMcpServer|addMcpServer|mcpClient\.connect)\s*\(\s*(?:url|endpoint|serverConfig|req\.|params\.|untrusted|remoteUrl))/i,
     message: "Model Context Protocol server registered without identity verification or authorization signature.",
     remediation: "Verify server host authorization and enforce cryptographic signature checks prior to registering external toolsets.",
     instruction: "Never register external toolsets or MCP servers without authentication and user authorization."
@@ -280,7 +280,7 @@ export const DEFAULT_AGENT_RULES: SecurityRule[] = [
     category: "AI_SECURITY",
     severity: "MEDIUM",
     languages: ["js", "jsx", "ts", "tsx", "py", "mjs", "cjs"],
-    pattern: /while\s*\(\s*(?:true|1|!done|!finished|!settled)\s*\)\s*\{(?![^}]*\b(?:maxRounds|maxSteps|maxIterations|round\s*>=|step\s*>=)\b)/i,
+    pattern: /\bwhile\s*\(\s*(?:true|1|!done|!finished|!settled)\s*\)\s*\{(?![^}]*\b(?:maxRounds|maxSteps|maxIterations|round\s*>=|step\s*>=)\b)[^}]*(?:agent|runner|llm)\.(?:step|run|complete|executeTurn)\s*\(/i,
     message: "Autonomous agent execution loop lacks explicit termination boundary or maximum step limit.",
     remediation: "Enforce a strict step threshold or cancellation budget to prevent runaway agent execution loops.",
     instruction: "Always respect maximum step thresholds and loop termination boundaries."
@@ -291,7 +291,7 @@ export const DEFAULT_AGENT_RULES: SecurityRule[] = [
     category: "AI_SECURITY",
     severity: "MEDIUM",
     languages: ["js", "jsx", "ts", "tsx", "py", "mjs", "cjs"],
-    pattern: /\b(?:history|messages|chatContext)\.push\s*\(.*?\)(?![^;]*(?:slice|shift|trim|truncate|maxTokens|maxHistory))/i,
+    pattern: /\b(?:messages|history|conversation|chatContext)\s*\.push\s*\([^)]*\)(?![^\n]*(?:slice|shift|trim|truncate|maxTokens|maxHistory))/i,
     message: "LLM conversation context accumulates without token limits or sliding window truncation.",
     remediation: "Prune chat context using sliding window truncation or token counting before appending turns.",
     instruction: "Maintain concise conversation context and avoid unbounded accumulation."
@@ -302,7 +302,7 @@ export const DEFAULT_AGENT_RULES: SecurityRule[] = [
     category: "AI_SECURITY",
     severity: "HIGH",
     languages: ["js", "jsx", "ts", "tsx", "py", "mjs", "cjs"],
-    pattern: /\b(?:systemPrompt|systemMessage|system_prompt)\s*[:=].*?(?:process\.env\.(?:[A-Z_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH))|apiKey|api_key|secret)/i,
+    pattern: /\b(?:systemPrompt|systemMessage|system_prompt|instructions)\s*[:=].*?(?:process\.env\.(?:[A-Z_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH))|apiKey|api_key|password|secret|auth_token|token)\b/i,
     message: "Sensitive secrets or private API credentials embedded in prompt context.",
     remediation: "Strip private credentials from prompt text and provide secrets through isolated backend proxy channels.",
     instruction: "Never include secrets, API keys, private tokens, or credentials in prompt context or output."
@@ -313,7 +313,7 @@ export const DEFAULT_AGENT_RULES: SecurityRule[] = [
     category: "AI_SECURITY",
     severity: "HIGH",
     languages: ["js", "jsx", "ts", "tsx", "py", "mjs", "cjs"],
-    pattern: /\b(?:applyPatch|gitApply|applyDiff|writePatch)\s*\(\s*(?:aiPatch|llmResponse|output\.patch|modelDiff)/i,
+    pattern: /\b(?:applyPatch|gitApply|applyDiff|writePatch|fs\.writeFile|writeFileSync)\s*\(\s*(?:filepath|path|file)\s*,\s*(?:patch|suggestion|aiOutput|aiPatch|llmResponse|response\.content|output\.patch|modelDiff)\s*\)|\b(?:applyPatch|gitApply|applyDiff|writePatch)\s*\(\s*(?:aiPatch|llmResponse|output\.patch|modelDiff)/i,
     message: "Applying LLM-generated patch directly to codebase without path traversal or integrity checks.",
     remediation: "Validate destination file paths are strictly within workspace bounds and run static scans before applying patches.",
     instruction: "Always inspect relevant files before modifying them, validate bounds, and verify patch integrity."

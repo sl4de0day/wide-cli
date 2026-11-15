@@ -38,6 +38,7 @@ export async function runShellProcess(
     const child = spawn(command, {
       cwd: workingDirectory,
       shell: true,
+      detached: process.platform !== "win32",
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     });

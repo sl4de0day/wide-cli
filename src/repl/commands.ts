@@ -32,7 +32,7 @@ export const SLASH_COMMANDS: SlashCommandMeta[] = [
   { command: "/approve", usage: "/approve [read|write|run] [on|off]", description: "Inspect or toggle tool approval policy" },
   { command: "/scan", usage: "/scan [path]", description: "Run Wide SAST security scan in workspace" },
   { command: "/rules", usage: "/rules [list|sync]", description: "Inspect or synchronize wide-rules" },
-  { command: "/db", usage: "/db [list|connect|schema|query|audit]", description: "Manage databases, inspect schemas, and run queries" },
+  { command: "/db", usage: "/db [list|connect|schema|erd|query|export|history|audit]", description: "Manage databases, inspect schemas, export data, and run queries" },
   { command: "/browser", usage: "/browser [status|close]", description: "Inspect or close browser session" },
   { command: "/cd", usage: "/cd <directory>", description: "Change active workspace directory" },
   { command: "/compact", usage: "/compact", description: "Compact conversation context" },

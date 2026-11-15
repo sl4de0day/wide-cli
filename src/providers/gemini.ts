@@ -1,5 +1,6 @@
 import type { LLMProvider, ChatMessage, ProviderResponse, ToolCall } from "./types.js";
 import type { ToolDefinition } from "../tools/types.js";
+import { fetchWithRetry } from "./retry.js";
 
 export class GeminiProvider implements LLMProvider {
   public name = "gemini";
@@ -85,12 +86,16 @@ export class GeminiProvider implements LLMProvider {
     }
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:streamGenerateContent?alt=sse&key=${this.apiKey}`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal
-    });
+    const response = await fetchWithRetry(
+      url,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal
+      },
+      { maxRetries: 2, timeoutMs: 60000, label: "gemini" }
+    );
 
     if (!response.ok) {
       const errText = await response.text();

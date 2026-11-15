@@ -27,6 +27,7 @@ export interface BrowserState {
   formInputs: Record<string, string>;
   history: string[];
   mode?: "playwright" | "cdp" | "http";
+  stealth?: boolean;
   lastScreenshotPath?: string;
 }
 
@@ -35,6 +36,93 @@ export interface BrowserConsoleEntry {
   text: string;
   timestamp: string;
 }
+
+const BROWSER_EMOJI_ZWJ_RE = /(?:\p{Extended_Pictographic}|\p{Emoji_Presentation}|[\u2600-\u27BF])(?:\uFE0F|\uFE0E|[\u{1F3FB}-\u{1F3FF}])?(?:\u200D(?:\p{Extended_Pictographic}|\p{Emoji_Presentation}|[\u2600-\u27BF])(?:\uFE0F|\uFE0E|[\u{1F3FB}-\u{1F3FF}])?)+/gu;
+const BROWSER_EMOJI_KEYCAP_RE = /[0-9#*]\uFE0F?\u20E3/gu;
+const BROWSER_EMOJI_SUPP_RE = /[\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\u{E0020}-\u{E007F}]/gu;
+const BROWSER_EMOJI_PICT_RE = /\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?/gu;
+const BROWSER_EMOJI_PRES_RE = /\p{Emoji_Presentation}(?:\uFE0F|\uFE0E)?/gu;
+const BROWSER_EMOJI_BMP_RE = /[\u231A-\u23FF\u2600-\u27BF\u2B05-\u2B55][\uFE0E\uFE0F]?|[\u2139\u2194-\u21AA\u24C2\u25AA-\u25FE\u2934-\u2935\u3030\u303D\u3297\u3299]\uFE0F|[\uFE0E\uFE0F\u200D\u20E3]/gu;
+
+export function stripBrowserEmojis(text: string): string {
+  return String(text ?? "")
+    .replace(BROWSER_EMOJI_ZWJ_RE, "")
+    .replace(BROWSER_EMOJI_KEYCAP_RE, "")
+    .replace(BROWSER_EMOJI_SUPP_RE, "")
+    .replace(BROWSER_EMOJI_PICT_RE, "")
+    .replace(BROWSER_EMOJI_PRES_RE, "")
+    .replace(BROWSER_EMOJI_BMP_RE, "")
+    .replace(/[\uD800-\uDFFF]/g, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+const HAR_SENSITIVE_HEADERS = new Set([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "x-api-key",
+  "x-auth-token",
+  "x-csrf-token",
+]);
+
+function redactHarHeaders(headers: any): Array<{ name: string; value: string }> {
+  const out: Array<{ name: string; value: string }> = [];
+  if (Array.isArray(headers)) {
+    for (const h of headers) {
+      if (!h?.name) continue;
+      const name = String(h.name);
+      out.push({ name, value: HAR_SENSITIVE_HEADERS.has(name.toLowerCase()) ? "[REDACTED]" : String(h.value ?? "") });
+    }
+    return out;
+  }
+  if (headers && typeof headers === "object") {
+    for (const [name, value] of Object.entries(headers)) {
+      out.push({ name, value: HAR_SENSITIVE_HEADERS.has(name.toLowerCase()) ? "[REDACTED]" : String(value ?? "") });
+    }
+  }
+  return out;
+}
+
+function parseHarQuery(urlStr: string): Array<{ name: string; value: string }> {
+  try {
+    const parsed = new URL(urlStr);
+    const out: Array<{ name: string; value: string }> = [];
+    for (const [name, value] of parsed.searchParams.entries()) {
+      out.push({ name, value });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+const CLI_STEALTH_INIT_SCRIPT = `(() => {
+  try { Object.defineProperty(navigator, "webdriver", { get: () => undefined, configurable: true }); } catch {}
+  try {
+    if (!navigator.languages || navigator.languages.length === 0) {
+      Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"], configurable: true });
+    }
+  } catch {}
+  try {
+    if (!navigator.plugins || navigator.plugins.length === 0) {
+      Object.defineProperty(navigator, "plugins", {
+        get: () => [
+          { name: "Chrome PDF Plugin", filename: "internal-pdf-viewer", description: "Portable Document Format" },
+          { name: "Chrome PDF Viewer", filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai", description: "" },
+          { name: "Native Client", filename: "internal-nacl-plugin", description: "" }
+        ],
+        configurable: true
+      });
+    }
+  } catch {}
+  try {
+    if (!window.chrome) {
+      Object.defineProperty(window, "chrome", { value: { runtime: {}, app: { isInstalled: false } }, configurable: true });
+    }
+  } catch {}
+})();`;
 
 interface CdpPending {
   resolve: (value: any) => void;
@@ -48,132 +136,146 @@ class NativeCdpSession {
   private nextId = 1;
   private pending = new Map<number, CdpPending>();
   private eventListeners = new Map<string, Array<(params: any) => void>>();
+  private networkRequests = new Map<string, any>();
+  public harEntries: any[] = [];
   public consoleEntries: BrowserConsoleEntry[] = [];
   public lastStatusCode = 200;
 
-  public async connect(executablePath: string, proxyUrl?: string): Promise<void> {
+  public async connect(executablePath: string, proxyUrl?: string, stealth = false): Promise<void> {
     const WS = (globalThis as any).WebSocket;
     if (typeof WS !== "function") {
       throw new Error("Native WebSocket runtime unavailable");
     }
 
     this.profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "wide-cli-cdp-"));
-    const args = [
-      "--headless=new",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-gpu",
-      "--disable-extensions",
-      "--disable-background-networking",
-      "--remote-debugging-port=0",
-      `--user-data-dir=${this.profileDir}`
-    ];
-    if (proxyUrl) {
-      args.push(`--proxy-server=${proxyUrl}`);
-    }
-    args.push("about:blank");
+    try {
+      const args = [
+        "--headless=new",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-gpu",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--remote-debugging-port=0",
+        `--user-data-dir=${this.profileDir}`
+      ];
+      if (stealth) {
+        args.push("--disable-blink-features=AutomationControlled");
+      }
+      if (proxyUrl) {
+        args.push(`--proxy-server=${proxyUrl}`);
+      }
+      args.push("about:blank");
 
-    const wsBaseUrl = await new Promise<string>((resolvePromise, rejectPromise) => {
-      let settled = false;
-      let stderrBuf = "";
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          rejectPromise(new Error("Timed out waiting for browser DevTools endpoint"));
-        }
-      }, 15000);
-
-      this.proc = spawn(executablePath, args, {
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true
-      });
-
-      this.proc.on("error", (err) => {
-        clearTimeout(timer);
-        if (!settled) {
-          settled = true;
-          rejectPromise(err);
-        }
-      });
-
-      this.proc.on("exit", (code) => {
-        clearTimeout(timer);
-        if (!settled) {
-          settled = true;
-          rejectPromise(new Error(`Browser exited early (${code}): ${stderrBuf.slice(0, 300)}`));
-        }
-      });
-
-      this.proc.stderr?.on("data", (chunk: Buffer) => {
-        stderrBuf += chunk.toString("utf8");
-        const m = /DevTools listening on (ws:\/\/[^\s]+)/i.exec(stderrBuf);
-        if (m && !settled) {
-          settled = true;
-          clearTimeout(timer);
-          resolvePromise(m[1]);
-        }
-      });
-    });
-
-    const parsed = new URL(wsBaseUrl);
-    const httpBase = `http://${parsed.host}`;
-    let pageWsUrl = "";
-
-    for (let attempt = 0; attempt < 20; attempt++) {
-      try {
-        const res = await fetch(`${httpBase}/json/list`);
-        if (res.ok) {
-          const targets = (await res.json()) as any[];
-          const pageTarget = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
-          if (pageTarget?.webSocketDebuggerUrl) {
-            pageWsUrl = pageTarget.webSocketDebuggerUrl;
-            break;
+      const wsBaseUrl = await new Promise<string>((resolvePromise, rejectPromise) => {
+        let settled = false;
+        let stderrBuf = "";
+        const timer = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            rejectPromise(new Error("Timed out waiting for browser DevTools endpoint"));
           }
+        }, 15000);
+        timer.unref?.();
+
+        this.proc = spawn(executablePath, args, {
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true
+        });
+
+        this.proc.on("error", (err) => {
+          clearTimeout(timer);
+          if (!settled) {
+            settled = true;
+            rejectPromise(err);
+          }
+        });
+
+        this.proc.on("exit", (code) => {
+          clearTimeout(timer);
+          if (!settled) {
+            settled = true;
+            rejectPromise(new Error(`Browser exited early (${code}): ${stderrBuf.slice(0, 300)}`));
+          }
+        });
+
+        this.proc.stderr?.on("data", (chunk: Buffer) => {
+          stderrBuf += chunk.toString("utf8");
+          const m = /DevTools listening on (ws:\/\/[^\s]+)/i.exec(stderrBuf);
+          if (m && !settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolvePromise(m[1]);
+          }
+        });
+      });
+
+      const parsed = new URL(wsBaseUrl);
+      const httpBase = `http://${parsed.host}`;
+      let pageWsUrl = "";
+
+      for (let attempt = 0; attempt < 20; attempt++) {
+        try {
+          const res = await fetch(`${httpBase}/json/list`, { signal: AbortSignal.timeout(2000) });
+          if (res.ok) {
+            const targets = (await res.json()) as any[];
+            const pageTarget = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
+            if (pageTarget?.webSocketDebuggerUrl) {
+              pageWsUrl = pageTarget.webSocketDebuggerUrl;
+              break;
+            }
+          }
+        } catch {
         }
-      } catch {
+        await new Promise((r) => setTimeout(r, 100));
       }
-      await new Promise((r) => setTimeout(r, 100));
-    }
 
-    if (!pageWsUrl) {
-      const created = await fetch(`${httpBase}/json/new?about:blank`, { method: "PUT" }).catch(() => null);
-      if (created && created.ok) {
-        const t = (await created.json()) as any;
-        pageWsUrl = t?.webSocketDebuggerUrl || "";
+      if (!pageWsUrl) {
+        const created = await fetch(`${httpBase}/json/new?about:blank`, { method: "PUT", signal: AbortSignal.timeout(3000) }).catch(() => null);
+        if (created && created.ok) {
+          const t = (await created.json()) as any;
+          pageWsUrl = t?.webSocketDebuggerUrl || "";
+        }
       }
-    }
 
-    if (!pageWsUrl) {
+      if (!pageWsUrl) {
+        throw new Error("Could not acquire CDP page target");
+      }
+
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        const timer = setTimeout(() => rejectPromise(new Error("CDP WebSocket connect timeout")), 10000);
+        timer.unref?.();
+        const ws = new WS(pageWsUrl);
+        this.ws = ws;
+        ws.addEventListener("open", () => {
+          clearTimeout(timer);
+          resolvePromise();
+        });
+        ws.addEventListener("error", () => {
+          clearTimeout(timer);
+          rejectPromise(new Error("CDP WebSocket connection failed"));
+        });
+        ws.addEventListener("message", (ev: any) => {
+          this.handleMessage(typeof ev.data === "string" ? ev.data : String(ev.data));
+        });
+        ws.addEventListener("close", () => {
+          for (const [, p] of this.pending) {
+            p.reject(new Error("CDP connection closed"));
+          }
+          this.pending.clear();
+        });
+      });
+    } catch (err) {
       await this.dispose();
-      throw new Error("Could not acquire CDP page target");
+      throw err;
     }
-
-    await new Promise<void>((resolvePromise, rejectPromise) => {
-      const timer = setTimeout(() => rejectPromise(new Error("CDP WebSocket connect timeout")), 10000);
-      const ws = new WS(pageWsUrl);
-      this.ws = ws;
-      ws.addEventListener("open", () => {
-        clearTimeout(timer);
-        resolvePromise();
-      });
-      ws.addEventListener("error", () => {
-        clearTimeout(timer);
-        rejectPromise(new Error("CDP WebSocket connection failed"));
-      });
-      ws.addEventListener("message", (ev: any) => {
-        this.handleMessage(typeof ev.data === "string" ? ev.data : String(ev.data));
-      });
-      ws.addEventListener("close", () => {
-        for (const [, p] of this.pending) {
-          p.reject(new Error("CDP connection closed"));
-        }
-        this.pending.clear();
-      });
-    });
 
     await this.send("Page.enable");
     await this.send("Runtime.enable");
     await this.send("Network.enable");
+    if (stealth) {
+      await this.send("Page.addScriptToEvaluateOnNewDocument", { source: CLI_STEALTH_INIT_SCRIPT }).catch(() => {});
+    }
     await this.send("Emulation.setDeviceMetricsOverride", {
       width: 1280,
       height: 800,
@@ -207,10 +309,83 @@ class NativeCdpSession {
       }
     });
 
+    this.on("Network.requestWillBeSent", (params) => {
+      if (!params?.requestId || !params?.request) return;
+      this.networkRequests.set(params.requestId, {
+        startedDateTime: params.wallTime ? new Date(params.wallTime * 1000).toISOString() : new Date().toISOString(),
+        startTimestamp: Number(params.timestamp || 0),
+        request: params.request,
+        response: null,
+        endTimestamp: Number(params.timestamp || 0),
+      });
+      if (this.networkRequests.size > 400) {
+        const oldest = this.networkRequests.keys().next().value;
+        if (oldest !== undefined) this.networkRequests.delete(oldest);
+      }
+    });
+
     this.on("Network.responseReceived", (params) => {
       if (params?.type === "Document" && typeof params?.response?.status === "number") {
         this.lastStatusCode = params.response.status;
       }
+      const rec = params?.requestId ? this.networkRequests.get(params.requestId) : null;
+      if (rec) {
+        rec.response = params.response || null;
+        rec.endTimestamp = Number(params.timestamp || rec.startTimestamp || 0);
+      }
+    });
+
+    const finalizeHar = (requestId: string, endTimestamp: number, encodedLength: number, failedText = "") => {
+      const rec = requestId ? this.networkRequests.get(requestId) : null;
+      if (!rec) return;
+      this.networkRequests.delete(requestId);
+      const reqUrl = String(rec.request?.url || "");
+      if (reqUrl.startsWith("data:") || reqUrl.startsWith("blob:")) return;
+      const endTs = Number(endTimestamp || rec.endTimestamp || rec.startTimestamp || 0);
+      const elapsedMs = rec.startTimestamp > 0 && endTs >= rec.startTimestamp ? Math.round((endTs - rec.startTimestamp) * 1000) : 0;
+      const resp = rec.response || {};
+      this.harEntries.push({
+        pageref: "page_1",
+        startedDateTime: rec.startedDateTime,
+        time: elapsedMs,
+        request: {
+          method: String(rec.request?.method || "GET"),
+          url: reqUrl,
+          httpVersion: String(resp.protocol || "HTTP/1.1"),
+          cookies: [],
+          headers: redactHarHeaders(rec.request?.headers),
+          queryString: parseHarQuery(reqUrl),
+          headersSize: -1,
+          bodySize: typeof rec.request?.postData === "string" ? Buffer.byteLength(rec.request.postData, "utf8") : 0,
+        },
+        response: {
+          status: Number(resp.status || 0),
+          statusText: failedText || String(resp.statusText || ""),
+          httpVersion: String(resp.protocol || "HTTP/1.1"),
+          cookies: [],
+          headers: redactHarHeaders(resp.headers),
+          content: {
+            size: Number(encodedLength || resp.encodedDataLength || 0),
+            mimeType: String(resp.mimeType || "x-unknown"),
+          },
+          redirectURL: "",
+          headersSize: -1,
+          bodySize: Number(encodedLength || resp.encodedDataLength || 0),
+        },
+        cache: {},
+        timings: { send: 0, wait: elapsedMs, receive: 0 },
+      });
+      if (this.harEntries.length > 500) {
+        this.harEntries.splice(0, this.harEntries.length - 500);
+      }
+    };
+
+    this.on("Network.loadingFinished", (params) => {
+      finalizeHar(params?.requestId, params?.timestamp, params?.encodedDataLength, "");
+    });
+
+    this.on("Network.loadingFailed", (params) => {
+      finalizeHar(params?.requestId, params?.timestamp, 0, params?.errorText || "Failed");
     });
   }
 
@@ -294,6 +469,13 @@ class NativeCdpSession {
   }
 
   public async dispose(): Promise<void> {
+    for (const [, p] of this.pending) {
+      try {
+        p.reject(new Error("CDP session disposed"));
+      } catch {
+      }
+    }
+    this.pending.clear();
     try {
       if (this.ws) {
         this.ws.close();
@@ -410,7 +592,10 @@ export class HeadlessBrowserController {
   private pwPage: any = null;
   private consoleBuffer: BrowserConsoleEntry[] = [];
   private cookieJar = new Map<string, string>();
-  private userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Wide-CLI/0.4141126";
+  private stealth = false;
+  private harEntries: any[] = [];
+  private harStartedAt = "";
+  private userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Wide-CLI/0.5151126";
 
   public findSystemBrowserExecutable(): string | null {
     const candidates: string[] = [];
@@ -490,6 +675,9 @@ export class HeadlessBrowserController {
 
     registerProcessCleanup();
     activeControllers.add(this);
+    if (!this.harStartedAt) {
+      this.harStartedAt = new Date().toISOString();
+    }
 
     const exe = this.findSystemBrowserExecutable();
     const proxyUrl = process.env.WIDE_CATCHER_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
@@ -497,22 +685,75 @@ export class HeadlessBrowserController {
     const pw = await this.tryLoadPlaywright();
     if (pw?.chromium && exe) {
       try {
+        const pwArgs = ["--no-sandbox", "--disable-gpu"];
+        if (this.stealth) {
+          pwArgs.push("--disable-blink-features=AutomationControlled");
+        }
         const launchOpts: any = {
           executablePath: exe,
           headless: true,
-          args: ["--no-sandbox", "--disable-gpu"]
+          args: pwArgs
         };
         if (proxyUrl) {
           launchOpts.proxy = { server: proxyUrl };
         }
         this.pwBrowser = await pw.chromium.launch(launchOpts);
-        this.pwContext = await this.pwBrowser.newContext({ viewport: { width: 1280, height: 800 } });
+        const contextOpts: any = { viewport: { width: 1280, height: 800 } };
+        if (this.stealth) {
+          contextOpts.userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+          contextOpts.locale = "en-US";
+        }
+        this.pwContext = await this.pwBrowser.newContext(contextOpts);
+        if (this.stealth) {
+          await this.pwContext.addInitScript(CLI_STEALTH_INIT_SCRIPT);
+        }
         this.pwPage = await this.pwContext.newPage();
         this.pwPage.on("console", (msg: any) => {
           this.pushConsoleEntry(msg.type(), msg.text());
         });
         this.pwPage.on("pageerror", (err: Error) => {
           this.pushConsoleEntry("error", err.message);
+        });
+        this.pwPage.on("requestfinished", async (req: any) => {
+          try {
+            const reqUrl = String(req.url?.() || "");
+            if (reqUrl.startsWith("data:") || reqUrl.startsWith("blob:")) return;
+            const resp = await req.response().catch(() => null);
+            const timing = typeof req.timing === "function" ? req.timing() : {};
+            const elapsedMs = timing && typeof timing.responseEnd === "number" && timing.responseEnd > 0 ? Math.round(timing.responseEnd) : 0;
+            this.harEntries.push({
+              pageref: "page_1",
+              startedDateTime: new Date().toISOString(),
+              time: elapsedMs,
+              request: {
+                method: String(req.method?.() || "GET"),
+                url: reqUrl,
+                httpVersion: "HTTP/1.1",
+                cookies: [],
+                headers: redactHarHeaders(req.headers?.() || {}),
+                queryString: parseHarQuery(reqUrl),
+                headersSize: -1,
+                bodySize: 0,
+              },
+              response: {
+                status: resp ? Number(resp.status?.() || 0) : 0,
+                statusText: resp ? String(resp.statusText?.() || "") : "",
+                httpVersion: "HTTP/1.1",
+                cookies: [],
+                headers: redactHarHeaders(resp ? resp.headers?.() : {}),
+                content: { size: 0, mimeType: String((resp && resp.headers?.()?.["content-type"]) || "x-unknown") },
+                redirectURL: "",
+                headersSize: -1,
+                bodySize: 0,
+              },
+              cache: {},
+              timings: { send: 0, wait: elapsedMs, receive: 0 },
+            });
+            if (this.harEntries.length > 500) {
+              this.harEntries.splice(0, this.harEntries.length - 500);
+            }
+          } catch {
+          }
         });
         this.pwPage.on("response", (res: any) => {
           try {
@@ -523,6 +764,7 @@ export class HeadlessBrowserController {
           }
         });
         this.state.mode = "playwright";
+        this.state.stealth = this.stealth;
         return "playwright";
       } catch {
         await this.cleanupLiveDrivers();
@@ -532,9 +774,10 @@ export class HeadlessBrowserController {
     if (exe) {
       try {
         const session = new NativeCdpSession();
-        await session.connect(exe, proxyUrl || undefined);
+        await session.connect(exe, proxyUrl || undefined, this.stealth);
         this.cdp = session;
         this.state.mode = "cdp";
+        this.state.stealth = this.stealth;
         return "cdp";
       } catch {
         await this.cleanupLiveDrivers();
@@ -542,6 +785,7 @@ export class HeadlessBrowserController {
     }
 
     this.state.mode = "http";
+    this.state.stealth = this.stealth;
     return "http";
   }
 
@@ -600,7 +844,7 @@ export class HeadlessBrowserController {
     if (!snap) return;
 
     this.state.url = String(snap.url || this.state.url);
-    this.state.title = String(snap.title || this.state.url);
+    this.state.title = stripBrowserEmojis(String(snap.title || "")) || this.state.url;
     this.state.textContent = String(snap.textContent || "");
     this.state.rawHtml = String(snap.rawHtml || "");
     this.state.elements = Array.isArray(snap.elements) ? snap.elements : [];
@@ -650,7 +894,7 @@ export class HeadlessBrowserController {
       .replace(/<svg\b[^<]*(?:(?!<\/svg>)<[^<]*)*<\/svg>/gi, "");
 
     const titleMatch = /<title[^>]*>([^<]*)<\/title>/i.exec(clean);
-    const title = titleMatch ? titleMatch[1].trim() : "";
+    const title = titleMatch ? stripBrowserEmojis(titleMatch[1]) : "";
 
     const elements: DOMElement[] = [];
     let elemIdx = 1;
@@ -727,12 +971,16 @@ export class HeadlessBrowserController {
     return attrs;
   }
 
-  public async open(url?: string): Promise<string> {
+  public async open(url?: string, opts?: { stealth?: boolean }): Promise<string> {
+    if (typeof opts?.stealth === "boolean" && opts.stealth !== this.stealth) {
+      await this.cleanupLiveDrivers();
+      this.stealth = opts.stealth;
+    }
     const mode = await this.ensureLiveSession();
     if (url && url.trim()) {
       return this.navigate(url);
     }
-    return `Browser session initialized (engine: ${mode}, url: ${this.state.url}).`;
+    return `Browser session initialized (engine: ${mode}, url: ${this.state.url}${this.stealth ? ", stealth: on" : ""}).`;
   }
 
   public async navigate(url: string): Promise<string> {
@@ -782,11 +1030,16 @@ export class HeadlessBrowserController {
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 20000);
+    const reqStartedAt = Date.now();
+    const startedIso = new Date(reqStartedAt).toISOString();
+    if (!this.harStartedAt) this.harStartedAt = startedIso;
 
     try {
       const headers: Record<string, string> = {
-        "User-Agent": this.userAgent,
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*;q=0.8"
+        "User-Agent": this.stealth
+          ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+          : this.userAgent,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
       };
       if (this.cookieJar.size > 0) {
         headers.Cookie = Array.from(this.cookieJar.entries()).map(([k, v]) => `${k}=${v}`).join("; ");
@@ -801,9 +1054,49 @@ export class HeadlessBrowserController {
       this.state.formInputs = {};
 
       const parsed = this.parseHtml(this.state.rawHtml);
-      this.state.title = parsed.title || this.state.url;
+      this.state.title = stripBrowserEmojis(parsed.title) || this.state.url;
       this.state.elements = parsed.elements;
       this.state.textContent = parsed.textContent;
+
+      const elapsedMs = Math.max(0, Date.now() - reqStartedAt);
+      const respHeadersObj: Record<string, string> = {};
+      res.headers.forEach((v, k) => {
+        respHeadersObj[k] = v;
+      });
+      this.harEntries.push({
+        pageref: "page_1",
+        startedDateTime: startedIso,
+        time: elapsedMs,
+        request: {
+          method: "GET",
+          url: this.state.url,
+          httpVersion: "HTTP/1.1",
+          cookies: [],
+          headers: redactHarHeaders(headers),
+          queryString: parseHarQuery(this.state.url),
+          headersSize: -1,
+          bodySize: 0,
+        },
+        response: {
+          status: res.status,
+          statusText: res.statusText || "",
+          httpVersion: "HTTP/1.1",
+          cookies: [],
+          headers: redactHarHeaders(respHeadersObj),
+          content: {
+            size: Buffer.byteLength(this.state.rawHtml, "utf8"),
+            mimeType: res.headers.get("content-type") || "text/html",
+          },
+          redirectURL: "",
+          headersSize: -1,
+          bodySize: Buffer.byteLength(this.state.rawHtml, "utf8"),
+        },
+        cache: {},
+        timings: { send: 0, wait: elapsedMs, receive: 0 },
+      });
+      if (this.harEntries.length > 500) {
+        this.harEntries.splice(0, this.harEntries.length - 500);
+      }
 
       return this.renderView();
     } catch (err: any) {
@@ -1272,11 +1565,39 @@ export class HeadlessBrowserController {
     return out.join("\n");
   }
 
+  public exportHar(opts?: { urlFilter?: string; limit?: number }): Record<string, any> {
+    const cdpEntries = this.cdp?.harEntries || [];
+    const combined = [...cdpEntries, ...this.harEntries];
+    const filter = String(opts?.urlFilter || "").trim().toLowerCase();
+    const limit = Math.max(1, Math.min(500, Number(opts?.limit) || 100));
+    const filtered = filter
+      ? combined.filter((e) => String(e?.request?.url || "").toLowerCase().includes(filter))
+      : combined;
+    return {
+      log: {
+        version: "1.2",
+        creator: { name: "Wide CLI Browser", version: "1.0" },
+        pages: [
+          {
+            startedDateTime: this.harStartedAt || new Date().toISOString(),
+            id: "page_1",
+            title: stripBrowserEmojis(this.state.title || this.state.url || "New Tab") || "New Tab",
+            pageTimings: { onContentLoad: -1, onLoad: -1 },
+          },
+        ],
+        entries: filtered.slice(-limit),
+      },
+    };
+  }
+
   public close(): string {
     const u = this.state.url;
     void this.cleanupLiveDrivers();
     this.consoleBuffer = [];
     this.cookieJar.clear();
+    this.harEntries = [];
+    this.harStartedAt = "";
+    this.stealth = false;
     this.state = {
       url: "about:blank",
       title: "",
@@ -1286,7 +1607,8 @@ export class HeadlessBrowserController {
       rawHtml: "",
       formInputs: {},
       history: [],
-      mode: "http"
+      mode: "http",
+      stealth: false,
     };
     return `Headless browser session closed. Cleared session for ${u}.`;
   }
@@ -1301,14 +1623,17 @@ export const browserOpenTool: Tool = {
     parameters: {
       type: "object",
       properties: {
-        url: { type: "string", description: "Optional URL to open immediately." }
+        url: { type: "string", description: "Optional URL to open immediately." },
+        stealth: { type: "boolean", description: "Opt-in stealth evasion mode masking navigator.webdriver." }
       },
       required: []
     }
   },
   async execute(params: Record<string, any>): Promise<ToolResult> {
     try {
-      const result = await defaultBrowser.open(params.url);
+      const result = await defaultBrowser.open(params.url, {
+        stealth: typeof params.stealth === "boolean" ? params.stealth : undefined,
+      });
       return { success: true, output: result };
     } catch (err: any) {
       return { success: false, output: "", error: `Open error: ${err.message}` };
@@ -1627,6 +1952,32 @@ export const browserEvalTool: Tool = {
       return { success: true, output: result };
     } catch (err: any) {
       return { success: false, output: "", error: `Eval error: ${err.message}` };
+    }
+  }
+};
+
+export const browserExportHarTool: Tool = {
+  definition: {
+    name: "browser_export_har",
+    description: "Export captured live browser network traffic in HAR 1.2 JSON format (with sensitive Auth/Cookie headers redacted).",
+    parameters: {
+      type: "object",
+      properties: {
+        urlFilter: { type: "string", description: "Optional substring to filter recorded request URLs." },
+        limit: { type: "number", description: "Maximum number of HAR entries to include (default 100)." }
+      },
+      required: []
+    }
+  },
+  async execute(params: Record<string, any>): Promise<ToolResult> {
+    try {
+      const har = defaultBrowser.exportHar({
+        urlFilter: params.urlFilter,
+        limit: params.limit,
+      });
+      return { success: true, output: JSON.stringify(har, null, 2).slice(0, 18000) };
+    } catch (err: any) {
+      return { success: false, output: "", error: `HAR export error: ${err.message}` };
     }
   }
 };

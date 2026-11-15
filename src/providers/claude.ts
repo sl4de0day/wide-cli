@@ -1,5 +1,6 @@
 import type { LLMProvider, ChatMessage, ProviderResponse, ToolCall } from "./types.js";
 import type { ToolDefinition } from "../tools/types.js";
+import { fetchWithRetry } from "./retry.js";
 
 export class ClaudeProvider implements LLMProvider {
   public name = "claude";
@@ -80,16 +81,20 @@ export class ClaudeProvider implements LLMProvider {
       body.tools = anthropicTools;
     }
 
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": this.apiKey,
-        "anthropic-version": "2023-06-01"
+    const res = await fetchWithRetry(
+      "https://api.anthropic.com/v1/messages",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": this.apiKey,
+          "anthropic-version": "2023-06-01"
+        },
+        body: JSON.stringify(body),
+        signal
       },
-      body: JSON.stringify(body),
-      signal
-    });
+      { maxRetries: 2, timeoutMs: 60000, label: "claude" }
+    );
 
     if (!res.ok) {
       const errText = await res.text();

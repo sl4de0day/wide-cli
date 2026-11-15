@@ -11,7 +11,7 @@ import { printBanner } from "../ui/banner.js";
 import { restoreTerminalCursor } from "../ui/spinner.js";
 import { handleSlashCommand, SLASH_COMMANDS } from "./commands.js";
 import { appendCliHistory, loadCliHistory } from "./history.js";
-import { expandAtFileMentions, listWorkspacePathsForCompletion } from "./mentions.js";
+import { expandAtFileMentions, listWorkspacePathsForCompletion, warmWorkspacePathsCache } from "./mentions.js";
 import { createSessionId, loadLatestSession, loadSession, saveSession } from "./sessions.js";
 import { RuleLoader } from "../security/loader.js";
 import { runInteractiveSetup } from "./setup.js";
@@ -48,6 +48,7 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
     ? createOptionalProvider(options.overrideProvider, options.overrideModel)
     : undefined;
   const agent = new Agent(process.cwd(), initialProvider);
+  void warmWorkspacePathsCache(agent.getWorkingDirectory());
   let sessionId = createSessionId();
 
   if (options.continueLatest) {

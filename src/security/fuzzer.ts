@@ -43,17 +43,27 @@ export async function fuzzTargetEndpoint(
   }
 
   const baselineUrl = new URL(url);
-  if (method === "GET") {
+  const baselineInit: RequestInit = {
+    method,
+    headers: { "User-Agent": "Wide-Security-Agent/1.0" },
+    signal: AbortSignal.timeout(10000)
+  };
+  if (method === "GET" || method === "HEAD") {
     baselineUrl.searchParams.set(param, "testbaselinevalue123");
+  } else {
+    baselineInit.headers = {
+      ...baselineInit.headers,
+      "Content-Type": "application/x-www-form-urlencoded"
+    };
+    const baseBody = new URLSearchParams();
+    baseBody.set(param, "testbaselinevalue123");
+    baselineInit.body = baseBody.toString();
   }
 
   let baselineStatus = 200;
   let baselineBody = "";
   try {
-    const baseRes = await fetch(baselineUrl.toString(), {
-      method,
-      headers: { "User-Agent": "Wide-Security-Agent/1.0" }
-    });
+    const baseRes = await fetch(baselineUrl.toString(), baselineInit);
     baselineStatus = baseRes.status;
     baselineBody = await baseRes.text();
   } catch (err: any) {
@@ -66,10 +76,11 @@ export async function fuzzTargetEndpoint(
     const targetUrl = new URL(url);
     const fetchOptions: RequestInit = {
       method,
-      headers: { "User-Agent": "Wide-Security-Agent/1.0" }
+      headers: { "User-Agent": "Wide-Security-Agent/1.0" },
+      signal: AbortSignal.timeout(10000)
     };
 
-    if (method === "GET") {
+    if (method === "GET" || method === "HEAD") {
       targetUrl.searchParams.set(param, payload);
     } else {
       fetchOptions.headers = {

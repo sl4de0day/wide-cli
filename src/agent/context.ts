@@ -15,7 +15,11 @@ export class ContextManager {
 
     const systemMsg = messages[0];
     const initialUserMsg = messages.find((m, i) => i > 0 && m.role === "user");
-    const recentMessages = messages.slice(-10);
+    let sliceStart = Math.max(1, messages.length - 10);
+    while (sliceStart > 1 && messages[sliceStart]?.role === "tool") {
+      sliceStart--;
+    }
+    const recentMessages = messages.slice(sliceStart);
 
     const compacted: ChatMessage[] = [];
     if (systemMsg) compacted.push(systemMsg);

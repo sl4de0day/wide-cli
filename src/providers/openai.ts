@@ -1,5 +1,6 @@
 import type { LLMProvider, ChatMessage, ProviderResponse, ToolCall } from "./types.js";
 import type { ToolDefinition } from "../tools/types.js";
+import { fetchWithRetry } from "./retry.js";
 
 export class OpenAICompatibleProvider implements LLMProvider {
   public name: string;
@@ -74,15 +75,19 @@ export class OpenAICompatibleProvider implements LLMProvider {
       body.tools = openAiTools;
     }
 
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.apiKey}`
+    const res = await fetchWithRetry(
+      `${this.baseUrl}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${this.apiKey}`
+        },
+        body: JSON.stringify(body),
+        signal
       },
-      body: JSON.stringify(body),
-      signal
-    });
+      { maxRetries: 2, timeoutMs: 60000, label: this.name }
+    );
 
     if (!res.ok) {
       const errText = await res.text();

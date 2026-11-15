@@ -1,5 +1,6 @@
 import type { LLMProvider, ChatMessage, ProviderResponse, ToolCall } from "./types.js";
 import type { ToolDefinition } from "../tools/types.js";
+import { fetchWithRetry } from "./retry.js";
 
 export interface OllamaProbeResult {
   reachable: boolean;
@@ -44,6 +45,18 @@ export class OllamaProvider implements LLMProvider {
       if (m.role === "tool") {
         return { role: "tool", content: m.content, name: m.name };
       }
+      if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
+        return {
+          role: "assistant",
+          content: m.content || "",
+          tool_calls: m.toolCalls.map(tc => ({
+            function: {
+              name: tc.name,
+              arguments: tc.arguments
+            }
+          }))
+        };
+      }
       return { role: m.role, content: m.content };
     });
 
@@ -71,12 +84,16 @@ export class OllamaProvider implements LLMProvider {
 
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/api/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal
-      });
+      response = await fetchWithRetry(
+        `${this.baseUrl}/api/chat`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal
+        },
+        { maxRetries: 1, timeoutMs: 120000, label: "ollama" }
+      );
     } catch (err: any) {
       if (err?.name === "AbortError" || signal?.aborted) {
         const abortErr = new Error("Aborted");
@@ -133,6 +150,27 @@ export class OllamaProvider implements LLMProvider {
             }
           } catch {
           }
+        }
+      }
+      const tail = buffer.trim();
+      if (tail) {
+        try {
+          const parsed = JSON.parse(tail);
+          const msg = parsed.message;
+          if (msg?.content) {
+            fullText += msg.content;
+            onChunk(msg.content);
+          }
+          if (msg?.tool_calls) {
+            for (const tc of msg.tool_calls) {
+              collectedToolCalls.push({
+                id: `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                name: tc.function.name,
+                arguments: tc.function.arguments || {}
+              });
+            }
+          }
+        } catch {
         }
       }
     } finally {

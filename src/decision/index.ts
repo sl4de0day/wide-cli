@@ -388,7 +388,7 @@ export class Criterion {
   public readonly term: (candidate: number) => number;
 
   constructor(weight: number, term: (candidate: number) => number) {
-    if (weight < 0.0) throw new RangeError("weight cannot be negative");
+    if (!Number.isFinite(weight) || weight < 0.0) throw new RangeError("weight must be finite and non-negative");
     if (!term) throw new TypeError("term cannot be null");
     this.weight = weight;
     this.term = term;
@@ -405,9 +405,10 @@ export class WeightedScorer {
     let m = 0.0;
     for (const c of this.criteria) {
       if (!c || !c.term) throw new TypeError("criterion or term cannot be null");
+      if (!Number.isFinite(c.weight) || c.weight < 0.0) throw new RangeError("weight must be finite and non-negative");
       m += c.weight;
     }
-    if (m <= 0.0) throw new RangeError("total weight must be positive");
+    if (!Number.isFinite(m) || m <= 0.0) throw new RangeError("total weight must be positive");
     this.totalWeight = m;
   }
 
@@ -415,7 +416,7 @@ export class WeightedScorer {
     let s = 0.0;
     for (const c of this.criteria) {
       let f = c.term(candidate);
-      if (f < 0.0) f = 0.0;
+      if (!Number.isFinite(f) || f < 0.0) f = 0.0;
       else if (f > 1.0) f = 1.0;
       s += c.weight * f;
     }
@@ -460,7 +461,7 @@ export class SynchronizationBarrier {
   private readonly reportTimes: Float64Array;
   private quorumReached: boolean;
   private currentPhase: number;
-  private stageStartTime: number;
+  private stageStartTime: number | null;
 
   constructor(capacity = 16) {
     if (capacity < 1) throw new RangeError("capacity must be at least 1");
@@ -471,7 +472,7 @@ export class SynchronizationBarrier {
     this.reportTimes = new Float64Array(capacity);
     this.quorumReached = false;
     this.currentPhase = 0;
-    this.stageStartTime = 0.0;
+    this.stageStartTime = null;
   }
 
   public get reachedQuorum(): boolean {
@@ -501,7 +502,7 @@ export class SynchronizationBarrier {
       }
     }
 
-    if (this.stageStartTime === 0.0) this.stageStartTime = now;
+    if (this.stageStartTime === null) this.stageStartTime = now;
 
     if (readyCount >= required) {
       this.quorumReached = true;
@@ -523,6 +524,6 @@ export class SynchronizationBarrier {
     this.reportTimes.fill(0.0);
     this.quorumReached = false;
     this.currentPhase = 0;
-    this.stageStartTime = 0.0;
+    this.stageStartTime = null;
   }
 }

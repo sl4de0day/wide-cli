@@ -42,10 +42,14 @@ export const httpRequestTool: Tool = {
       }
 
       const res = await fetch(targetUrl, fetchOptions);
-      clearTimeout(timer);
       const durationMs = Date.now() - startTime;
 
-      let resText = await res.text();
+      let resText = "";
+      try {
+        resText = await res.text();
+      } finally {
+        clearTimeout(timer);
+      }
       if (resText.length > 8000) {
         resText = resText.slice(0, 8000) + "\n... [Body truncated]";
       }

@@ -37,10 +37,10 @@ function testPngBanner() {
   assert.strictEqual(monoRows[2], "▓▓▓▓████████");
   assert.strictEqual(monoRows[4], "▓▓▓▓▓▓▓▓    ");
 
-  const bannerText = formatBannerLines("0.4141126", { colorMode: "truecolor" }).map(stripAnsi).join("\n");
+  const bannerText = formatBannerLines("0.5151126", { colorMode: "truecolor" }).map(stripAnsi).join("\n");
   assert.ok(!bannerText.toUpperCase().includes("WIDE CLI"), "Banner must not print WIDE CLI text");
   assert.ok(!bannerText.includes("██╗"), "Banner must not use ASCII block font letters");
-  assert.ok(bannerText.includes("Wide v0.4141126"), "Banner should show Wide version");
+  assert.ok(bannerText.includes("Wide v0.5151126"), "Banner should show Wide version");
 
   console.log("[PASS] Wide PNG logo renders accurately in truecolor and monochrome");
 }

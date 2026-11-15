@@ -4,7 +4,7 @@ import { runCommandTool } from "./shell.js";
 import { securityScanTool, fuzzEndpointTool, generatePayloadsTool } from "./security.js";
 import { httpRequestTool } from "./http.js";
 import { gitTool } from "./git.js";
-import { dbAuditTool, dbInspectSchemaTool, dbListTool, dbQueryTool } from "./db.js";
+import { dbAuditTool, dbExportTool, dbInspectSchemaTool, dbListTool, dbQueryTool } from "./db.js";
 import {
   browserOpenTool,
   browserNavigateTool,
@@ -21,6 +21,7 @@ import {
   browserConsoleTool,
   browserCookiesTool,
   browserEvalTool,
+  browserExportHarTool,
   browserCloseTool
 } from "./browser.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
@@ -40,6 +41,7 @@ export const ALL_TOOLS: Record<string, Tool> = {
   db_list: dbListTool,
   db_inspect_schema: dbInspectSchemaTool,
   db_audit: dbAuditTool,
+  db_export: dbExportTool,
   db_query: dbQueryTool,
   browser_open: browserOpenTool,
   browser_navigate: browserNavigateTool,
@@ -56,6 +58,7 @@ export const ALL_TOOLS: Record<string, Tool> = {
   browser_console: browserConsoleTool,
   browser_cookies: browserCookiesTool,
   browser_eval: browserEvalTool,
+  browser_export_har: browserExportHarTool,
   browser_close: browserCloseTool,
 };
 

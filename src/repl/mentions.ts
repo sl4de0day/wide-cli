@@ -4,6 +4,45 @@ import fg from "fast-glob";
 
 const MAX_FILE_BYTES = 40 * 1024;
 const MAX_TOTAL_BYTES = 100 * 1024;
+const COMPLETION_CACHE_TTL_MS = 5000;
+const COMPLETION_GLOB_OPTIONS = {
+  onlyFiles: true,
+  dot: false,
+  deep: 3,
+  suppressErrors: true,
+  ignore: ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/out/**", "**/target/**"],
+};
+
+interface CompletionCacheEntry {
+  files: string[];
+  fetchedAt: number;
+  refreshing: boolean;
+}
+
+const completionCache = new Map<string, CompletionCacheEntry>();
+
+function filterCompletionPaths(entries: string[], prefix: string): string[] {
+  if (!prefix) return entries.slice(0, 40);
+  const lower = prefix.toLowerCase();
+  return entries.filter((e) => e.toLowerCase().includes(lower)).slice(0, 30);
+}
+
+export async function warmWorkspacePathsCache(cwd: string): Promise<void> {
+  const key = resolve(cwd);
+  const existing = completionCache.get(key);
+  if (existing?.refreshing) return;
+  const entry: CompletionCacheEntry = existing || { files: [], fetchedAt: 0, refreshing: false };
+  entry.refreshing = true;
+  completionCache.set(key, entry);
+  try {
+    const entries = await fg("**/*", { ...COMPLETION_GLOB_OPTIONS, cwd: key });
+    entry.files = entries.map((e) => e.replace(/\\/g, "/"));
+    entry.fetchedAt = Date.now();
+  } catch {
+  } finally {
+    entry.refreshing = false;
+  }
+}
 
 export interface ExpandedMentionPrompt {
   prompt: string;
@@ -53,18 +92,20 @@ export function expandAtFileMentions(input: string, cwd: string): ExpandedMentio
 }
 
 export function listWorkspacePathsForCompletion(cwd: string, prefix = ""): string[] {
+  const key = resolve(cwd);
+  const now = Date.now();
+  const cached = completionCache.get(key);
+  if (cached) {
+    if (now - cached.fetchedAt > COMPLETION_CACHE_TTL_MS && !cached.refreshing) {
+      void warmWorkspacePathsCache(key);
+    }
+    return filterCompletionPaths(cached.files, prefix);
+  }
   try {
-    const entries = fg.sync("**/*", {
-      cwd,
-      onlyFiles: true,
-      dot: false,
-      deep: 3,
-      ignore: ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/out/**", "**/target/**"],
-    });
+    const entries = fg.sync("**/*", { ...COMPLETION_GLOB_OPTIONS, cwd: key });
     const normalized = entries.map((e) => e.replace(/\\/g, "/"));
-    if (!prefix) return normalized.slice(0, 40);
-    const lower = prefix.toLowerCase();
-    return normalized.filter((e) => e.toLowerCase().includes(lower)).slice(0, 30);
+    completionCache.set(key, { files: normalized, fetchedAt: now, refreshing: false });
+    return filterCompletionPaths(normalized, prefix);
   } catch {
     return [];
   }

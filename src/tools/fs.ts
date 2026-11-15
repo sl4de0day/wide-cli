@@ -1,17 +1,18 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import pc from "picocolors";
-import { formatUnifiedDiff } from "../ui/diff.js";
+import { formatColoredDiffPreview, type DiffPreviewResult } from "../ui/diff.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
 
 async function confirmWriteAction(
   toolName: string,
   relPath: string,
-  diffPreview: string,
+  diffResult: DiffPreviewResult,
   context: ToolExecutionContext
 ): Promise<boolean> {
-  console.log(`\n${pc.cyan(`[${toolName === "write_file" ? "WRITE" : "EDIT"}]`)} ${pc.bold(relPath)}`);
-  console.log(diffPreview || pc.dim("(New file created)"));
+  const summary = `${pc.green(`+${diffResult.added}`)} ${pc.red(`-${diffResult.removed}`)}`;
+  console.log(`\n${pc.cyan(`[${toolName === "write_file" ? "WRITE" : "EDIT"}]`)} ${pc.bold(relPath)} (${summary})`);
+  console.log(diffResult.preview || pc.dim("(New file created)"));
 
   if (context.autoApproveWrite !== false) return true;
   if (context.sessionApprovedTools?.has("write")) return true;
@@ -19,9 +20,9 @@ async function confirmWriteAction(
 
   const decision = await context.requestApproval({
     tool: toolName,
-    title: `Allow ${toolName} to modify ${relPath}?`,
+    title: `Allow ${toolName} to modify ${relPath}? (+${diffResult.added}/-${diffResult.removed})`,
     detail: relPath,
-    preview: diffPreview,
+    preview: diffResult.preview,
     sessionKey: "write",
   });
   if (decision === "always") {
@@ -51,7 +52,18 @@ export const readFileTool: Tool = {
       if (!existsSync(fullPath)) {
         return { success: false, output: "", error: `File not found: ${params.path}` };
       }
-      const raw = readFileSync(fullPath, "utf8");
+      const st = statSync(fullPath);
+      if (!st.isFile()) {
+        return { success: false, output: "", error: `Path is not a regular file: ${params.path}` };
+      }
+      if (st.size > 2 * 1024 * 1024) {
+        return { success: false, output: "", error: `File exceeds 2 MB safety limit (${st.size} bytes): ${params.path}` };
+      }
+      const rawBuf = readFileSync(fullPath);
+      if (rawBuf.subarray(0, Math.min(rawBuf.length, 4096)).includes(0)) {
+        return { success: false, output: "", error: `Refusing to read binary file: ${params.path}` };
+      }
+      const raw = rawBuf.toString("utf8");
       const lines = raw.split("\n");
 
       let start = 1;
@@ -95,15 +107,15 @@ export const writeFileTool: Tool = {
       const relPath = relative(context.workingDirectory, fullPath);
       const parentDir = dirname(fullPath);
 
-      if (!existsSync(parentDir)) {
-        mkdirSync(parentDir, { recursive: true });
-      }
-
       const oldContent = existsSync(fullPath) ? readFileSync(fullPath, "utf8") : "";
-      const diff = formatUnifiedDiff(relPath, oldContent, params.content);
+      const diff = formatColoredDiffPreview(relPath, oldContent, params.content, { maxLines: 80 });
       const allowed = await confirmWriteAction("write_file", relPath, diff, context);
       if (!allowed) {
         return { success: false, output: "", error: `Write denied for ${relPath}` };
+      }
+
+      if (!existsSync(parentDir)) {
+        mkdirSync(parentDir, { recursive: true });
       }
 
       writeFileSync(fullPath, params.content, "utf8");
@@ -150,7 +162,7 @@ export const editFileTool: Tool = {
       }
 
       const newContent = content.replace(params.target, params.replacement);
-      const diff = formatUnifiedDiff(relPath, content, newContent);
+      const diff = formatColoredDiffPreview(relPath, content, newContent, { maxLines: 80 });
       const allowed = await confirmWriteAction("edit_file", relPath, diff, context);
       if (!allowed) {
         return { success: false, output: "", error: `Edit denied for ${relPath}` };
