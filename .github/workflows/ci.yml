@@ -25,7 +25,6 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          registry-url: "https://registry.npmjs.org"
 
       - name: Install dependencies
         run: npm ci
@@ -39,20 +38,25 @@ jobs:
       - name: Auto-Publish to npm
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          npm install -g npm@latest
+          if [ -n "$NPM_TOKEN" ]; then
+            npm config set "//registry.npmjs.org/:_authToken" "$NPM_TOKEN"
+          fi
           PKG_VER=$(node -p "require('./package.json').version")
           EXISTING=$(npm view "wide-cli@${PKG_VER}" version 2>/dev/null || true)
-          if [ "$EXISTING" = "$PKG_VER" ]; then
+          bump_and_build() {
             STAMP=$(date -u +"%d%m%y%H%M")
             export NEW_VER="0.5.${STAMP}"
             npm version "$NEW_VER" --no-git-tag-version
             node -e "const fs=require('node:fs'); fs.writeFileSync('src/index.ts', fs.readFileSync('src/index.ts','utf8').replace(/\.version\(\"[^\"]+\"\)/, '.version(\"' + process.env.NEW_VER + '\")'));"
             npm run build
+          }
+          if [ "$EXISTING" = "$PKG_VER" ]; then
+            bump_and_build
           fi
-          if [ -n "$NPM_TOKEN" ]; then
-            npm publish --access public
-          else
-            npm publish --provenance --access public || echo "Notice: Configure NPM_TOKEN secret or npm OIDC Trusted Publisher to enable automatic npm publishing."
+          if ! npm publish --provenance --access public; then
+            bump_and_build
+            npm publish --provenance --access public || echo "Notice: Configure npm Trusted Publisher or NPM_TOKEN secret to enable automatic npm publishing."
           fi
