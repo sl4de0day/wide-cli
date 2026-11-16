@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  repository_dispatch:
+    types: [wide-rules-updated]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
 
 jobs:
   build-and-test:
@@ -18,6 +25,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          registry-url: "https://registry.npmjs.org"
 
       - name: Install dependencies
         run: npm ci
@@ -27,3 +35,24 @@ jobs:
 
       - name: Run Test Suite
         run: npm test
+
+      - name: Auto-Publish to npm
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PKG_VER=$(node -p "require('./package.json').version")
+          EXISTING=$(npm view "wide-cli@${PKG_VER}" version 2>/dev/null || true)
+          if [ "$EXISTING" = "$PKG_VER" ]; then
+            STAMP=$(date -u +"%d%m%y%H%M")
+            export NEW_VER="0.5.${STAMP}"
+            npm version "$NEW_VER" --no-git-tag-version
+            node -e "const fs=require('node:fs'); fs.writeFileSync('src/index.ts', fs.readFileSync('src/index.ts','utf8').replace(/\.version\(\"[^\"]+\"\)/, '.version(\"' + process.env.NEW_VER + '\")'));"
+            npm run build
+          fi
+          if [ -n "$NPM_TOKEN" ]; then
+            npm publish --access public
+          else
+            npm publish --provenance --access public || echo "Notice: Configure NPM_TOKEN secret or npm OIDC Trusted Publisher to enable automatic npm publishing."
+          fi

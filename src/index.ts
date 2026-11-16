@@ -71,7 +71,7 @@ const program = new Command();
 program
   .name("wide")
   .description("Terminal-first autonomous AI coding and security agent for the Wide ecosystem")
-  .version("0.5151126")
+  .version("0.5.161126")
   .option("-d, --debug", "Enable structured debug diagnostics to stderr")
   .option("-v, --verbose", "Enable verbose diagnostic logging")
   .argument("[prompt...]", "Optional initial prompt for the agent")

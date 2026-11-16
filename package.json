@@ -1,15 +1,22 @@
 {
   "name": "wide-cli",
-  "version": "0.5151126",
+  "version": "0.5.161126",
   "description": "Terminal-first autonomous AI coding & security agent for the Wide ecosystem",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
     "wide": "bin/wide.js"
   },
+  "files": [
+    "bin",
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "dev": "tsc && node dist/index.js",
     "start": "node bin/wide.js",
     "test": "node tests/suite.test.mjs",
