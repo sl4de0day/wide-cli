@@ -10,6 +10,7 @@
   "files": [
     "bin",
     "dist",
+    "data",
     "README.md",
     "LICENSE"
   ],
@@ -17,6 +18,7 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build",
+    "sync:bundle": "node scripts/sync-bundle.mjs",
     "dev": "tsc && node dist/index.js",
     "start": "node bin/wide.js",
     "test": "node tests/suite.test.mjs",

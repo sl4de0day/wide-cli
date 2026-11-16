@@ -14,6 +14,8 @@ const REMOTE_OSV_URL = "https://raw.githubusercontent.com/sl4de0day/wide-rules/m
 const REMOTE_CHECKSUMS_URL = "https://raw.githubusercontent.com/sl4de0day/wide-rules/main/dist/SHA256SUMS";
 const INSTALL_WIDE_RULES = resolve(dirname(fileURLToPath(import.meta.url)), "../../../wide-rules/dist/rules.json");
 const INSTALL_WIDE_OSV = resolve(dirname(fileURLToPath(import.meta.url)), "../../../wide-rules/dist/osv-bundle.json");
+const BUNDLED_WIDE_RULES = resolve(dirname(fileURLToPath(import.meta.url)), "../../data/rules.json");
+const BUNDLED_WIDE_OSV = resolve(dirname(fileURLToPath(import.meta.url)), "../../data/osv-bundle.json");
 const rulesFileCache = new Map<string, { mtimeMs: number; size: number; rules: SecurityRule[] }>();
 const sanitizationRegexCache = new Map<string, RegExp>();
 
@@ -100,6 +102,9 @@ export class RuleLoader {
     if (existsSync(DEFAULT_CACHE_FILE)) {
       return { active: DEFAULT_CACHE_FILE, workspace: null, cache: DEFAULT_CACHE_FILE };
     }
+    if (existsSync(BUNDLED_WIDE_RULES)) {
+      return { active: BUNDLED_WIDE_RULES, workspace: null, cache: DEFAULT_CACHE_FILE };
+    }
     return { active: "embedded", workspace: null, cache: DEFAULT_CACHE_FILE };
   }
 
@@ -132,6 +137,11 @@ export class RuleLoader {
     if (existsSync(DEFAULT_CACHE_FILE)) {
       const cached = this.parseRulesFile(DEFAULT_CACHE_FILE);
       if (cached.length > 0) return cached;
+    }
+
+    if (existsSync(BUNDLED_WIDE_RULES)) {
+      const bundled = this.parseRulesFile(BUNDLED_WIDE_RULES);
+      if (bundled.length > 0) return bundled;
     }
 
     return [...SECURITY_RULES];
@@ -177,6 +187,12 @@ export class RuleLoader {
     if (existsSync(DEFAULT_CACHE_FILE)) {
       const cached = this.parseRulesFile(DEFAULT_CACHE_FILE);
       const filtered = cached.filter(r => r.category === "AI_SECURITY" || r.id.includes("ai-"));
+      if (filtered.length > 0) return mergeDefaultAgentRules(filtered);
+    }
+
+    if (existsSync(BUNDLED_WIDE_RULES)) {
+      const bundled = this.parseRulesFile(BUNDLED_WIDE_RULES);
+      const filtered = bundled.filter(r => r.category === "AI_SECURITY" || r.id.includes("ai-"));
       if (filtered.length > 0) return mergeDefaultAgentRules(filtered);
     }
 
@@ -237,7 +253,8 @@ export class RuleLoader {
       resolve(workspaceDir, ".wide", "osv.json"),
       DEFAULT_OSV_FILE,
       resolve(workspaceDir, "../wide-rules/dist/osv-bundle.json"),
-      INSTALL_WIDE_OSV
+      INSTALL_WIDE_OSV,
+      BUNDLED_WIDE_OSV
     ];
     for (const file of candidates) {
       if (existsSync(file)) {

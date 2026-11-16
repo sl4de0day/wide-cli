@@ -50,7 +50,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ "$EVENT_NAME" != "workflow_dispatch" ] && git rev-parse HEAD~1 >/dev/null 2>&1; then
-            if ! git diff --name-only HEAD~1 HEAD | grep -Eq '^(src/|bin/|package\.json$)'; then
+            if ! git diff --name-only HEAD~1 HEAD | grep -Eq '^(src/|bin/|data/|package\.json$)'; then
               echo "No changes in src/, bin/, or package.json; skipping npm publish."
               exit 0
             fi
