@@ -151,6 +151,9 @@ class NativeCdpSession {
     try {
       const args = [
         "--headless=new",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-gpu",
