@@ -43,7 +43,7 @@
     "url": "https://github.com/sl4de0day/wide-cli/issues"
   },
   "dependencies": {
-    "commander": "^13.1.0",
+    "commander": "^15.1.0",
     "diff": "^9.0.0",
     "fast-glob": "^3.3.3",
     "ioredis": "^6.0.0",
