@@ -1,4 +1,7 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+import * as http from "node:http";
+import type * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -129,6 +132,245 @@ interface CdpPending {
   reject: (err: Error) => void;
 }
 
+class NodeCdpWebSocket {
+  public readyState = 0;
+  private socket: net.Socket | null = null;
+  private rxBuf: Buffer = Buffer.alloc(0);
+  private fragOpcode = 0;
+  private fragChunks: Buffer[] = [];
+  private listeners: Record<string, Array<(ev: any) => void>> = {
+    open: [],
+    message: [],
+    error: [],
+    close: []
+  };
+
+  constructor(urlStr: string) {
+    const u = new URL(urlStr);
+    if (u.protocol !== "ws:") {
+      queueMicrotask(() => this.failConnect(new Error(`Unsupported WebSocket scheme: ${u.protocol}`)));
+      return;
+    }
+    const key = crypto.randomBytes(16).toString("base64");
+    const expectedAccept = crypto
+      .createHash("sha1")
+      .update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+      .digest("base64");
+
+    const req = http.request({
+      hostname: u.hostname,
+      port: Number(u.port || 80),
+      path: `${u.pathname}${u.search}`,
+      method: "GET",
+      headers: {
+        Host: u.host,
+        Connection: "Upgrade",
+        Upgrade: "websocket",
+        "Sec-WebSocket-Key": key,
+        "Sec-WebSocket-Version": "13"
+      }
+    });
+
+    req.on("upgrade", (res, socket, head) => {
+      const accept = String(res.headers["sec-websocket-accept"] || "").trim();
+      if (accept !== expectedAccept) {
+        socket.destroy();
+        this.failConnect(new Error("WebSocket handshake validation failed"));
+        return;
+      }
+      this.socket = socket;
+      socket.setNoDelay(true);
+      this.readyState = 1;
+      this.emit("open", {});
+
+      socket.on("data", (chunk: Buffer) => {
+        this.consume(chunk);
+      });
+      socket.on("error", (err) => {
+        if (this.readyState !== 3) {
+          this.emit("error", err);
+        }
+      });
+      socket.on("close", () => {
+        if (this.readyState !== 3) {
+          this.readyState = 3;
+          this.emit("close", {});
+        }
+      });
+
+      if (head && head.length > 0) {
+        this.consume(head);
+      }
+    });
+
+    req.on("response", (res) => {
+      res.resume();
+      this.failConnect(new Error(`WebSocket upgrade rejected with HTTP ${res.statusCode}`));
+    });
+
+    req.on("error", (err) => {
+      this.failConnect(err);
+    });
+
+    req.end();
+  }
+
+  public addEventListener(type: string, handler: (ev: any) => void): void {
+    if (!this.listeners[type]) {
+      this.listeners[type] = [];
+    }
+    this.listeners[type].push(handler);
+  }
+
+  private emit(type: string, ev: any): void {
+    const handlers = this.listeners[type];
+    if (!handlers || handlers.length === 0) return;
+    for (const fn of handlers.slice()) {
+      try {
+        fn(ev);
+      } catch {
+      }
+    }
+  }
+
+  private failConnect(err: Error): void {
+    if (this.readyState === 3) return;
+    this.readyState = 3;
+    this.emit("error", err);
+    this.emit("close", {});
+  }
+
+  public send(data: string): void {
+    if (this.readyState !== 1 || !this.socket || this.socket.destroyed) {
+      throw new Error("WebSocket is not open");
+    }
+    this.sendFrame(0x1, Buffer.from(String(data), "utf8"));
+  }
+
+  private sendFrame(opcode: number, payload: Buffer): void {
+    if (!this.socket || this.socket.destroyed) return;
+    const len = payload.length;
+    const hdrLen = len < 126 ? 2 : len <= 65535 ? 4 : 10;
+    const frame = Buffer.allocUnsafe(hdrLen + 4 + len);
+    frame[0] = 0x80 | (opcode & 0x0f);
+    if (len < 126) {
+      frame[1] = 0x80 | len;
+    } else if (len <= 65535) {
+      frame[1] = 0x80 | 126;
+      frame.writeUInt16BE(len, 2);
+    } else {
+      frame[1] = 0x80 | 127;
+      frame.writeBigUInt64BE(BigInt(len), 2);
+    }
+    const mask = crypto.randomBytes(4);
+    mask.copy(frame, hdrLen);
+    const bodyOffset = hdrLen + 4;
+    for (let i = 0; i < len; i++) {
+      frame[bodyOffset + i] = payload[i] ^ mask[i & 3];
+    }
+    this.socket.write(frame);
+  }
+
+  private consume(chunk: Buffer): void {
+    this.rxBuf = this.rxBuf.length > 0 ? Buffer.concat([this.rxBuf, chunk]) : chunk;
+    while (this.rxBuf.length >= 2) {
+      const b0 = this.rxBuf[0];
+      const b1 = this.rxBuf[1];
+      const fin = (b0 & 0x80) !== 0;
+      const opcode = b0 & 0x0f;
+      const masked = (b1 & 0x80) !== 0;
+      let len = b1 & 0x7f;
+      let offset = 2;
+
+      if (len === 126) {
+        if (this.rxBuf.length < offset + 2) break;
+        len = this.rxBuf.readUInt16BE(offset);
+        offset += 2;
+      } else if (len === 127) {
+        if (this.rxBuf.length < offset + 8) break;
+        len = Number(this.rxBuf.readBigUInt64BE(offset));
+        offset += 8;
+      }
+
+      let maskKey: Buffer | null = null;
+      if (masked) {
+        if (this.rxBuf.length < offset + 4) break;
+        maskKey = this.rxBuf.subarray(offset, offset + 4);
+        offset += 4;
+      }
+
+      if (this.rxBuf.length < offset + len) break;
+      const payload = Buffer.from(this.rxBuf.subarray(offset, offset + len));
+      this.rxBuf = this.rxBuf.subarray(offset + len);
+
+      if (maskKey) {
+        for (let i = 0; i < payload.length; i++) {
+          payload[i] ^= maskKey[i & 3];
+        }
+      }
+
+      if (opcode === 0x8) {
+        if (this.readyState === 1) {
+          this.readyState = 2;
+          try {
+            this.sendFrame(0x8, Buffer.alloc(0));
+            this.socket?.end();
+          } catch {
+          }
+        }
+        this.readyState = 3;
+        this.emit("close", {});
+        return;
+      }
+      if (opcode === 0x9) {
+        if (this.readyState === 1) {
+          try {
+            this.sendFrame(0xa, payload);
+          } catch {
+          }
+        }
+        continue;
+      }
+      if (opcode === 0xa) {
+        continue;
+      }
+
+      if (opcode === 0x1 || opcode === 0x2) {
+        this.fragOpcode = opcode;
+        this.fragChunks = [payload];
+      } else if (opcode === 0x0) {
+        this.fragChunks.push(payload);
+      }
+
+      if (fin && (opcode === 0x0 || opcode === 0x1 || opcode === 0x2)) {
+        const full = this.fragChunks.length === 1 ? this.fragChunks[0] : Buffer.concat(this.fragChunks);
+        this.fragChunks = [];
+        if (this.fragOpcode === 0x1 || this.fragOpcode === 0x2) {
+          this.emit("message", { data: full.toString("utf8") });
+        }
+      }
+    }
+  }
+
+  public close(): void {
+    if (this.readyState === 3) return;
+    if (this.readyState === 1 && this.socket && !this.socket.destroyed) {
+      this.readyState = 2;
+      try {
+        this.sendFrame(0x8, Buffer.alloc(0));
+      } catch {
+      }
+    }
+    this.readyState = 3;
+    try {
+      this.socket?.end();
+      this.socket?.destroy();
+    } catch {
+    }
+    this.emit("close", {});
+  }
+}
+
 class NativeCdpSession {
   private proc: ChildProcess | null = null;
   private profileDir: string | null = null;
@@ -142,10 +384,10 @@ class NativeCdpSession {
   public lastStatusCode = 200;
 
   public async connect(executablePath: string, proxyUrl?: string, stealth = false): Promise<void> {
-    const WS = (globalThis as any).WebSocket;
-    if (typeof WS !== "function") {
-      throw new Error("Native WebSocket runtime unavailable");
-    }
+    const WS =
+      typeof (globalThis as any).WebSocket === "function" && process.env.WIDE_CLI_FORCE_NODE_WS !== "1"
+        ? (globalThis as any).WebSocket
+        : NodeCdpWebSocket;
 
     this.profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "wide-cli-cdp-"));
     try {
@@ -154,6 +396,7 @@ class NativeCdpSession {
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
+        "--remote-allow-origins=*",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-gpu",
