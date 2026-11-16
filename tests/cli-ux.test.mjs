@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { generateCompletionScript, installShellCompletion, normalizeShellName } from "../dist/completion.js";
 import { formatColoredDiffPreview } from "../dist/ui/diff.js";
 import { executeTool } from "../dist/tools/index.js";
@@ -85,7 +86,7 @@ async function runCliUxTests() {
     const secondInstall = installShellCompletion({ shell: "powershell", profilePath: fakeProfile });
     assert.strictEqual(secondInstall.updated, false);
 
-    const cliBin = path.resolve(process.cwd(), "C:/Users/yusuf/Downloads/wide/wide-cli/dist/index.js");
+    const cliBin = fileURLToPath(new URL("../dist/index.js", import.meta.url));
     const cliOut = execFileSync(process.execPath, [cliBin, "completion", "--shell", "bash"], { encoding: "utf8" });
     assert.ok(cliOut.includes("complete -F _wide_complete wide"));
     console.log("[PASS] Shell completion script generation, idempotent install, and CLI execution");
