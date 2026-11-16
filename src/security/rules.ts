@@ -215,6 +215,36 @@ export const SECURITY_RULES: SecurityRule[] = [
     pattern: /(?:res\.(?:send|json)\s*\(\s*(?:err\.stack|err\.message|error\.stack)|printStackTrace\s*\(\)|ini_set\s*\(\s*['"]display_errors['"]\s*,\s*['"]1['"]\))/i,
     message: "Detailed internal error stack trace or debug information exposed to client.",
     remediation: "Log stack traces internally and return generic error responses with error correlation IDs to clients."
+  },
+  {
+    id: "wide/cicd-gha-pull-request-target-checkout",
+    cwe: "CWE-94",
+    category: "INJECTION",
+    severity: "CRITICAL",
+    languages: ["yaml", "yml"],
+    pattern: /ref:\s*\$\{\{\s*github\.event\.pull_request\.head\.(?:sha|ref)/,
+    message: "Checking out untrusted pull request head code inside a workflow can grant write-token RCE.",
+    remediation: "Avoid checking out github.event.pull_request.head in pull_request_target workflows."
+  },
+  {
+    id: "wide/iac-terraform-public-ingress",
+    cwe: "CWE-284",
+    category: "NETWORK",
+    severity: "HIGH",
+    languages: ["tf", "hcl", "yaml", "yml"],
+    pattern: /(?:cidr_blocks\s*=\s*\[\s*"0\.0\.0\.0\/0"\s*\]|acl\s*=\s*"public-read(?:-write)?")/,
+    message: "Infrastructure configuration exposes resources or ingress rules to public access.",
+    remediation: "Restrict security group ingress CIDRs to trusted internal ranges and keep buckets private."
+  },
+  {
+    id: "wide/logic-jwt-unverified-decode",
+    cwe: "CWE-347",
+    category: "AUTH",
+    severity: "CRITICAL",
+    languages: ["js", "ts", "py", "go", "java", "php"],
+    pattern: /(?:\bjwt\.decode\s*\(|["']?verify_signature["']?\s*[:=]\s*False\b|\balgorithms\s*[:=]\s*\[[^\]\r\n]{0,40}["']none["'])/,
+    message: "JWT decoded or configured without cryptographic signature verification.",
+    remediation: "Use jwt.verify or verify_signature=True with an explicit algorithm allowlist excluding 'none'."
   }
 ];
 
