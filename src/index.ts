@@ -151,12 +151,26 @@ program
 
 program
   .command("scan [path]")
-  .description("Run Wide native SAST security engine across 20+ vulnerability categories")
+  .description("Run Wide native SAST, taint flow, and OSV SCA security engine")
   .option("-s, --severity <level>", "Minimum severity (CRITICAL, HIGH, MEDIUM, LOW, ALL)", "ALL")
   .option("-r, --rules <path>", "Path to custom rules.json file")
+  .option("--no-sca", "Disable OSV dependency vulnerability scanning")
+  .option("--history", "Scan recent git commits for historically leaked secrets")
+  .option("--sarif <file>", "Write findings in SARIF 2.1.0 JSON format")
   .action(async (targetPath = ".", opts) => {
     const { executeTool } = await import("./tools/index.js");
-    const res = await executeTool("run_security_scan", { path: targetPath, severityFilter: opts.severity, rulesPath: opts.rules }, { workingDirectory: process.cwd() });
+    const res = await executeTool(
+      "run_security_scan",
+      {
+        path: targetPath,
+        severityFilter: opts.severity,
+        rulesPath: opts.rules,
+        sca: opts.sca,
+        scanHistory: Boolean(opts.history),
+        sarifPath: opts.sarif
+      },
+      { workingDirectory: process.cwd() }
+    );
     console.log(res.output);
   });
 

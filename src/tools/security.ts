@@ -16,7 +16,10 @@ export const securityScanTool: Tool = {
           type: "string",
           description: "Minimum severity to report: 'ALL', 'MEDIUM', 'HIGH', or 'CRITICAL'.",
           enum: ["ALL", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
-        }
+        },
+        sca: { type: "boolean", description: "Include OSV dependency vulnerability and reachability scan (default: true)." },
+        scanHistory: { type: "boolean", description: "Scan recent git commits for historically leaked credentials (default: false)." },
+        sarifPath: { type: "string", description: "Optional file path to write SARIF 2.1.0 JSON report." }
       },
       required: []
     }
@@ -25,7 +28,11 @@ export const securityScanTool: Tool = {
     try {
       const scanner = new SecurityScanner(context.workingDirectory, params.rulesPath);
       const filter = (params.severityFilter || "ALL") as Finding["severity"] | "ALL";
-      const result = await scanner.scanPath(params.path || ".", filter);
+      const result = await scanner.scanPath(params.path || ".", filter, {
+        sca: params.sca !== false,
+        scanHistory: Boolean(params.scanHistory),
+        sarifPath: params.sarifPath
+      });
       const report = scanner.formatCliReport(result);
 
       return {
@@ -50,17 +57,24 @@ export const fuzzEndpointTool: Tool = {
       type: "object",
       properties: {
         url: { type: "string", description: "Target endpoint URL." },
-        param: { type: "string", description: "Query or body parameter to fuzz." },
+        param: { type: "string", description: "Query, form, JSON, header, cookie, or path parameter to fuzz." },
         payloadType: {
           type: "string",
           description: "Category of payloads to inject.",
-          enum: ["sqli", "xss", "ssrf", "traversal", "cmd", "ssti"]
+          enum: ["sqli", "xss", "ssrf", "traversal", "cmd", "ssti", "idor"]
         },
         method: {
           type: "string",
-          description: "HTTP method: 'GET' or 'POST' (default: 'GET').",
-          enum: ["GET", "POST"]
-        }
+          description: "HTTP method: 'GET', 'POST', 'PUT', 'PATCH', or 'DELETE' (default: 'GET').",
+          enum: ["GET", "POST", "PUT", "PATCH", "DELETE"]
+        },
+        location: {
+          type: "string",
+          description: "Parameter placement: 'query', 'form', 'json', 'header', 'cookie', or 'path'.",
+          enum: ["query", "form", "json", "header", "cookie", "path"]
+        },
+        headers: { type: "object", description: "Optional HTTP headers map." },
+        compareHeaders: { type: "object", description: "Optional secondary credentials headers for IDOR differential checks." }
       },
       required: ["url", "param", "payloadType"]
     }
@@ -71,7 +85,12 @@ export const fuzzEndpointTool: Tool = {
         params.url,
         params.param,
         params.payloadType,
-        params.method || "GET"
+        params.method || "GET",
+        {
+          location: params.location,
+          headers: params.headers,
+          compareHeaders: params.compareHeaders
+        }
       );
 
       const lines: string[] = [
