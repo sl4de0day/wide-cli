@@ -44,7 +44,7 @@
   },
   "dependencies": {
     "commander": "^13.1.0",
-    "diff": "^7.0.0",
+    "diff": "^9.0.0",
     "fast-glob": "^3.3.3",
     "ioredis": "^6.0.0",
     "mysql2": "^3.24.6",
