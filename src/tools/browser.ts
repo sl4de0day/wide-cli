@@ -1018,15 +1018,17 @@ export class HeadlessBrowserController {
     }
 
     if (exe) {
-      try {
-        const session = new NativeCdpSession();
-        await session.connect(exe, proxyUrl || undefined, this.stealth);
-        this.cdp = session;
-        this.state.mode = "cdp";
-        this.state.stealth = this.stealth;
-        return "cdp";
-      } catch {
-        await this.cleanupLiveDrivers();
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const session = new NativeCdpSession();
+          await session.connect(exe, proxyUrl || undefined, this.stealth);
+          this.cdp = session;
+          this.state.mode = "cdp";
+          this.state.stealth = this.stealth;
+          return "cdp";
+        } catch {
+          await this.cleanupLiveDrivers();
+        }
       }
     }
 
