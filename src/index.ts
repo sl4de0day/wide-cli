@@ -175,6 +175,38 @@ program
   });
 
 program
+  .command("fix [path]")
+  .description("Interactively review and apply security patches or quick-fix suppressions")
+  .option("-s, --severity <level>", "Minimum severity to fix (CRITICAL, HIGH, MEDIUM, LOW, ALL)", "HIGH")
+  .option("-r, --rules <path>", "Path to custom rules.json file")
+  .option("-y, --yes", "Auto-apply all proposed patches without interactive confirmation")
+  .option("--dry-run", "Preview proposed diffs without writing modifications to disk")
+  .option("--suppress", "Only generate quick-fix suppressions (wide-ignore directives)")
+  .option("--ai", "Use AI LLM provider to synthesize intelligent code remediation patches")
+  .option("--provider <provider>", "LLM provider override (gemini, ollama, claude, deepseek, openai)")
+  .option("-m, --model <model>", "Model name override")
+  .action(async (targetPath = ".", opts) => {
+    try {
+      const { runInteractiveFix } = await import("./fix.js");
+      await runInteractiveFix({
+        path: targetPath,
+        severity: opts.severity,
+        rulesPath: opts.rules,
+        yes: Boolean(opts.yes),
+        dryRun: Boolean(opts.dryRun),
+        suppressOnly: Boolean(opts.suppress),
+        ai: Boolean(opts.ai),
+        provider: opts.provider,
+        model: opts.model,
+        cwd: process.cwd()
+      });
+    } catch (err: any) {
+      console.error(pc.red(`Fix failed: ${err.message}`));
+      process.exit(1);
+    }
+  });
+
+program
   .command("update")
   .alias("upgrade")
   .description("Check for updates and synchronize the Wide CLI and rules to the latest version")

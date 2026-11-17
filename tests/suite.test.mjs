@@ -103,6 +103,7 @@ async function runTests() {
   await import("./cli-ux.test.mjs");
   await import("./security.test.mjs");
   await import("./hook.test.mjs");
+  await import("./fix.test.mjs");
 
   console.log("\nAll test suites passed successfully.");
 }
