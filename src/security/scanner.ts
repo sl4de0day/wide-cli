@@ -34,6 +34,7 @@ export interface ScanOptions {
   scanHistory?: boolean;
   maxHistoryCommits?: number;
   sarifPath?: string;
+  files?: string[];
 }
 
 export interface ScanResult {
@@ -205,7 +206,9 @@ export class SecurityScanner {
     const targetStat = statSync(fullTarget);
     const files = targetStat.isFile()
       ? [relative(fullTarget, fullTarget) || basename(fullTarget)]
-      : await fg(
+      : options.files && options.files.length > 0
+        ? options.files
+        : await fg(
           [
             "**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts,vue,svelte,html,htm,py,php,java,kt,kts,scala,cs,go,rb,rs,c,cc,cpp,h,ex,exs,sql,json,yaml,yml,tf,tfvars}",
             "**/Dockerfile",
@@ -321,7 +324,7 @@ export class SecurityScanner {
         const lineText = lines[i];
         if (lineText.length > 1500) continue;
         if (/\bwide-ignore\b/i.test(lineText)) continue;
-        if (i > 0 && /\bwide-ignore-next-line\b/i.test(lines[i - 1])) continue;
+        if (i > 0 && /\bwide-ignore(-next-line)?\b/i.test(lines[i - 1])) continue;
         if (this.isCommentOnlyLine(lineText, langTokens)) continue;
         evaluateCandidate(lineText, i, i + 1);
       }
@@ -330,7 +333,7 @@ export class SecurityScanner {
         if (span.endLine <= span.startLine) continue;
         const startIdx = span.startLine - 1;
         if (/\bwide-ignore\b/i.test(lines[startIdx] || "")) continue;
-        if (startIdx > 0 && /\bwide-ignore-next-line\b/i.test(lines[startIdx - 1] || "")) continue;
+        if (startIdx > 0 && /\bwide-ignore(-next-line)?\b/i.test(lines[startIdx - 1] || "")) continue;
         evaluateCandidate(span.text, startIdx, span.endLine);
       }
     }
@@ -384,6 +387,14 @@ export class SecurityScanner {
     }
 
     return result;
+  }
+
+  public async scanFiles(
+    files: string[],
+    minSeverity: Finding["severity"] | "ALL" = "ALL",
+    options: ScanOptions = {}
+  ): Promise<ScanResult> {
+    return this.scanPath(".", minSeverity, { ...options, files });
   }
 
   public formatCliReport(result: ScanResult): string {

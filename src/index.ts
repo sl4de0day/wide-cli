@@ -347,4 +347,72 @@ completionCmd
     }
   });
 
+const hookCmd = program
+  .command("hook")
+  .description("Manage and execute Git pre-commit security hooks");
+
+hookCmd
+  .command("install")
+  .description("Install Wide pre-commit security hook in the current Git repository")
+  .option("--fail-on <severity>", "Minimum severity to block commit (CRITICAL, HIGH, MEDIUM, LOW)", "HIGH")
+  .option("-f, --force", "Overwrite existing pre-commit hook")
+  .action(async (opts) => {
+    try {
+      const { installPreCommitHook } = await import("./hook.js");
+      const res = installPreCommitHook({
+        failOn: opts.failOn,
+        force: Boolean(opts.force),
+        cwd: process.cwd()
+      });
+      if (res.installed) {
+        console.log(pc.green(`[OK] Pre-commit hook installed to ${res.hookPath}`));
+      } else {
+        console.log(pc.cyan(`[OK] ${res.message}`));
+      }
+    } catch (err: any) {
+      console.error(pc.red(`Failed to install hook: ${err.message}`));
+      process.exit(1);
+    }
+  });
+
+hookCmd
+  .command("uninstall")
+  .description("Uninstall Wide pre-commit security hook from the current Git repository")
+  .action(async () => {
+    try {
+      const { uninstallPreCommitHook } = await import("./hook.js");
+      const res = uninstallPreCommitHook({ cwd: process.cwd() });
+      if (res.uninstalled) {
+        console.log(pc.green(`[OK] Pre-commit hook removed from ${res.hookPath}`));
+      } else {
+        console.log(pc.yellow(`[WARN] ${res.message}`));
+      }
+    } catch (err: any) {
+      console.error(pc.red(`Failed to uninstall hook: ${err.message}`));
+      process.exit(1);
+    }
+  });
+
+hookCmd
+  .command("run")
+  .description("Run security check against staged Git changes")
+  .option("--fail-on <severity>", "Minimum severity to block commit (CRITICAL, HIGH, MEDIUM, LOW)", "HIGH")
+  .option("-r, --rules <path>", "Path to custom rules.json file")
+  .action(async (opts) => {
+    try {
+      const { runPreCommitHook } = await import("./hook.js");
+      const res = await runPreCommitHook({
+        failOn: opts.failOn,
+        rulesPath: opts.rules,
+        cwd: process.cwd()
+      });
+      if (res.blocked) {
+        process.exit(1);
+      }
+    } catch (err: any) {
+      console.error(pc.red(`Hook execution failed: ${err.message}`));
+      process.exit(1);
+    }
+  });
+
 await program.parseAsync(process.argv);
