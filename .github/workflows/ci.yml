@@ -43,36 +43,35 @@ jobs:
         with:
           fail-on: CRITICAL
 
-      - name: Auto-Publish to npm
+      - name: Publish to npm on Version Change
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
+          CURRENT=$(node -p "require('./package.json').version")
           if [ "$EVENT_NAME" != "workflow_dispatch" ] && git rev-parse HEAD~1 >/dev/null 2>&1; then
-            if ! git diff --name-only HEAD~1 HEAD | grep -Eq '^(src/|bin/|data/|package\.json$)'; then
-              echo "No changes in src/, bin/, or package.json; skipping npm publish."
+            PREVIOUS=$(git show HEAD~1:package.json 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo "")
+            if [ "$CURRENT" = "$PREVIOUS" ]; then
+              echo "Version unchanged ($CURRENT); skipping npm publish."
               exit 0
             fi
+          fi
+          EXISTING=$(npm view "wide-cli@${CURRENT}" version 2>/dev/null || true)
+          if [ "$EXISTING" = "$CURRENT" ]; then
+            echo "wide-cli@${CURRENT} is already published on npm; skipping."
+            exit 0
           fi
           npm install -g npm@latest
           if [ -n "$NPM_TOKEN" ]; then
             npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
           fi
-          PKG_VER=$(node -p "require('./package.json').version")
-          EXISTING=$(npm view "wide-cli@${PKG_VER}" version 2>/dev/null || true)
-          if [ "$EXISTING" = "$PKG_VER" ]; then
-            STAMP=$(date -u +"%d%m%y%H%M")
-            export NEW_VER="0.5.${STAMP}"
-            npm version "$NEW_VER" --no-git-tag-version
-            node -e "const fs=require('node:fs'); fs.writeFileSync('src/index.ts', fs.readFileSync('src/index.ts','utf8').replace(/\.version\(\"[^\"]+\"\)/, '.version(\"' + process.env.NEW_VER + '\")'));"
-            npm run build
-          fi
-          if ! npm publish --provenance --access public; then
-            STAMP=$(date -u +"%d%m%y%H%M")
-            export NEW_VER="0.5.${STAMP}"
-            npm version "$NEW_VER" --no-git-tag-version
-            node -e "const fs=require('node:fs'); fs.writeFileSync('src/index.ts', fs.readFileSync('src/index.ts','utf8').replace(/\.version\(\"[^\"]+\"\)/, '.version(\"' + process.env.NEW_VER + '\")'));"
-            npm run build
-            npm publish --provenance --access public
+          export CURRENT_VER="$CURRENT"
+          node -e "const fs=require('node:fs'); fs.writeFileSync('src/index.ts', fs.readFileSync('src/index.ts','utf8').replace(/\.version\(\"[^\"]+\"\)/, '.version(\"' + process.env.CURRENT_VER + '\")'));"
+          npm run build
+          npm publish --provenance --access public
+          TAG="v${CURRENT}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "Wide CLI $CURRENT" --generate-notes --latest
           fi
