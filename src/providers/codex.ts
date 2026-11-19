@@ -345,7 +345,7 @@ export class CodexProvider implements LLMProvider {
         "-c",
         `mcp_servers.wide.url="${this.bridge.mcpUrl}"`,
         "-c",
-        `mcp_servers.wide.bearer_token_env_var="WIDE_CODEX_MCP_TOKEN"`,
+        `mcp_servers.wide.bearer_token_env_var="WIDE_CODEX_MCP_TOKEN"`, // wide-ignore wide/secret-assignment
       );
     }
     const spec = buildSpawnSpec(binPath, cliArgs);
@@ -778,7 +778,7 @@ export class CodexProvider implements LLMProvider {
       this.syncedMessageCount = 0;
     }
 
-    if (!this.proc || !this.proc.stdin.writable || this.workerSignature !== sig) {
+    if (!this.proc || !this.proc.stdin.writable || this.workerSignature !== sig) { // wide-ignore wide/timing-secret-nonconst-eq
       this.dispose();
       const useResume = Boolean(this.threadId && this.syncedMessageCount > 0);
       if (mcpTools.length > 0) {

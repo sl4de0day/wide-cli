@@ -294,7 +294,7 @@ export class AntigravityProvider implements LLMProvider {
       this.syncedMessageCount = 0;
     }
 
-    if (!this.proc || !this.proc.stdin.writable || this.workerSignature !== sig) {
+    if (!this.proc || !this.proc.stdin.writable || this.workerSignature !== sig) { // wide-ignore wide/timing-secret-nonconst-eq
       this.dispose();
       const useResume = Boolean(this.conversationId && this.syncedMessageCount > 0);
       if (mcpTools.length > 0) {

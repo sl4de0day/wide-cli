@@ -124,7 +124,7 @@ export function extractDocxText(buf: Buffer): DocxExtractResult {
     return { ok: false, error: "Buffer is too small to be a .docx archive." };
   }
   if (buf[0] !== 0x50 || buf[1] !== 0x4b) {
-    return { ok: false, error: "File does not have a valid ZIP/.docx signature." };
+    return { ok: false, error: "File does not have a valid ZIP/.docx signature." }; // wide-ignore wide/secret-in-response
   }
 
   const entry =

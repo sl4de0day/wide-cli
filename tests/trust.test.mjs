@@ -137,11 +137,11 @@ async function runTrustTests() {
   const ccProvider = new ClaudeCodeProvider("sonnet");
   try {
     const mockCli = join(tmpCc, "mock-claude.js");
-    const mockBody = [
+    const mockBody = [ // wide-ignore wide/secret-assignment
       "const readline = require('node:readline');",
       "const args = process.argv.slice(2);",
       "if (args[0] === 'auth') {",
-      "  process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }) + '\\n');",
+      "  process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }) + '\\n');", // wide-ignore wide/secret-assignment
       "  process.exit(0);",
       "}",
       "let n = 0;",

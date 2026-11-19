@@ -197,7 +197,7 @@ export function extractArticleFromHtml(html: string, url = ""): ExtractedArticle
   while ((im = imgRe.exec(imgScope)) !== null) {
     const attrs = parseTagAttrs(im[1]);
     const resolved = resolveMaybeUrl(attrs.src || attrs["data-src"] || "", url);
-    if (resolved && !resolved.startsWith("data:") && !imgSeen.has(resolved)) {
+    if (resolved && !resolved.startsWith("data:") && !imgSeen.has(resolved)) { // wide-ignore wide/path-containment-startswith-no-sep-js-java
       imgSeen.add(resolved);
       allImages.push(resolved);
       if (allImages.length >= 40) break;

@@ -406,7 +406,7 @@ class RegexCompiler {
 function extractSimpleLiterals(pattern: string, caseInsensitive: boolean): string[] {
   const parts = pattern.replace(/^\(\?[ims]+\)/i, "").split("|");
   if (parts.length > 1) {
-    const lits = parts.map((p) => p.replace(/[^A-Za-z0-9_./:-]/g, "")).filter((l) => l.length >= 3);
+    const lits = parts.map((p) => p.replace(/[^A-Za-z0-9_./:-]/g, "")).filter((l) => l.length >= 3); // wide-ignore wide/flagsan-dash-permissive-sanitizer
     return lits.length === parts.length ? lits.map((l) => (caseInsensitive ? l.toLowerCase() : l)) : [];
   }
   const runs = pattern.match(/[A-Za-z0-9_./:-]{3,}/g) || [];

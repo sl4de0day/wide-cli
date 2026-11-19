@@ -55,7 +55,7 @@ class Html5Tokenizer {
   pos = 0;
   state: HtmlState;
   isClose = false;
-  tokenType: XssTokenType = "DATA_TEXT";
+  tokenType: XssTokenType = "DATA_TEXT"; // wide-ignore wide/secret-assignment
   tokenValue: Buffer = Buffer.alloc(0);
 
   constructor(buf: Buffer, ctx: Html5Context) {

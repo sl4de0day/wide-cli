@@ -699,7 +699,7 @@ export class ClaudeCodeProvider implements LLMProvider {
       this.syncedMessageCount = 0;
     }
 
-    if (!this.proc || !this.proc.stdin.writable || this.workerSignature !== sig) {
+    if (!this.proc || !this.proc.stdin.writable || this.workerSignature !== sig) { // wide-ignore wide/timing-secret-nonconst-eq
       this.dispose();
       this.activeTools = tools;
       const useResume = Boolean(this.claudeSessionId && this.syncedMessageCount > 0);
