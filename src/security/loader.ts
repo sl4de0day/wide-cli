@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "no
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { hasNestedQuantifiers } from "./inspect.js";
 import { SECURITY_RULES, DEFAULT_AGENT_RULES, SecurityRule } from "./rules.js";
 
 const DEFAULT_CACHE_DIR = join(homedir(), ".wide", "rules");
@@ -366,8 +367,18 @@ export class RuleLoader {
 
       for (const item of list) {
         if (!item.id || !item.pattern) continue;
+        if (hasNestedQuantifiers(String(item.pattern))) continue;
         try {
           const notMatchRaw = item["not-match"] || item.notMatch;
+          const safeNotMatch =
+            typeof notMatchRaw === "string" && notMatchRaw && !hasNestedQuantifiers(notMatchRaw)
+              ? new RegExp(notMatchRaw, "i")
+              : undefined;
+          const srcRaw = item["source-pattern"];
+          const safeSource =
+            typeof srcRaw === "string" && srcRaw && !hasNestedQuantifiers(srcRaw)
+              ? new RegExp(srcRaw, "i")
+              : undefined;
           const rule: SecurityRule = {
             id: item.id,
             cwe: item.cwe || "N/A",
@@ -375,8 +386,8 @@ export class RuleLoader {
             severity: item.severity || "MEDIUM",
             languages: item.languages || ["all"],
             pattern: new RegExp(item.pattern, "i"),
-            notMatch: typeof notMatchRaw === "string" && notMatchRaw ? new RegExp(notMatchRaw, "i") : undefined,
-            sourcePattern: item["source-pattern"] ? new RegExp(item["source-pattern"], "i") : undefined,
+            notMatch: safeNotMatch,
+            sourcePattern: safeSource,
             message: item.message || "",
             remediation: item.remediation || "",
             instruction: item.instruction || item.message || ""

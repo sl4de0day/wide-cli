@@ -1,4 +1,6 @@
 import { SecurityScanner, type Finding } from "../security/scanner.js";
+import { WideCrawler } from "../security/crawler.js";
+import { evaluateHttpInspection } from "../security/inspect.js";
 import { fuzzTargetEndpoint } from "../security/fuzzer.js";
 import { getPayloadsForType, getAllPayloadTypes } from "../security/payloads.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
@@ -61,7 +63,7 @@ export const fuzzEndpointTool: Tool = {
         payloadType: {
           type: "string",
           description: "Category of payloads to inject.",
-          enum: ["sqli", "xss", "ssrf", "traversal", "cmd", "ssti", "idor"]
+          enum: ["sqli", "xss", "ssrf", "traversal", "cmd", "ssti", "idor", "evasion", "smuggling"]
         },
         method: {
           type: "string",
@@ -155,5 +157,84 @@ export const generatePayloadsTool: Tool = {
       success: true,
       output: `Wide Security Payloads (${params.type.toUpperCase()}):\n\n${list.map((p, i) => `${i + 1}. ${p}`).join("\n")}`
     };
+  }
+};
+
+export const crawlTargetTool: Tool = {
+  definition: {
+    name: "crawl_target",
+    description: "Crawl a target web application using Wide spider engine (PathTrie, SimHash dedup, JS endpoints, passive headers/secrets/JWT audit).",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Seed HTTP or HTTPS URL." },
+        maxDepth: { type: "number", description: "Crawl depth limit (default: 3)." },
+        maxPages: { type: "number", description: "Maximum pages to crawl (default: 80)." },
+        fieldScope: { type: "string", enum: ["rdn", "fqdn", "dn"], description: "Scope matching mode (default: rdn)." },
+        allowPrivate: { type: "boolean", description: "Allow private/loopback targets (default: false)." },
+        tlsProfile: { type: "string", enum: ["none", "chrome", "firefox", "safari"], description: "Optional TLS impersonation profile." }
+      },
+      required: ["url"]
+    }
+  },
+  async execute(params): Promise<ToolResult> {
+    try {
+      const crawler = new WideCrawler();
+      const result = await crawler.crawl(String(params.url || ""), {
+        maxDepth: typeof params.maxDepth === "number" ? params.maxDepth : 3,
+        maxPages: typeof params.maxPages === "number" ? params.maxPages : 80,
+        fieldScope: params.fieldScope || "rdn",
+        allowPrivate: Boolean(params.allowPrivate),
+        tlsProfile: params.tlsProfile || "none",
+      });
+      return {
+        success: true,
+        output: JSON.stringify(result, null, 2),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        output: "",
+        error: `Crawl failed: ${err.message}`,
+      };
+    }
+  }
+};
+
+export const inspectHttpTool: Tool = {
+  definition: {
+    name: "inspect_http_message",
+    description: "Inspect an HTTP request/response using RFC 9112 conformance, evasion decoding, lexical SQLi/XSS tokenizers, ReDoS-safe rules, and learning exception drafts.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Target HTTP URL or path." },
+        method: { type: "string", description: "HTTP method (default GET)." },
+        headers: { type: "object", description: "Optional HTTP headers map." },
+        body: { type: "string", description: "Optional HTTP body." },
+        rawRequest: { type: "string", description: "Optional raw HTTP/1.x wire request for RFC 9112 smuggling check." },
+        rawResponse: { type: "string", description: "Optional raw HTTP/1.x wire response for poisoning check." },
+        learning: { type: "boolean", description: "Generate dated exception drafts for hits." }
+      },
+      required: ["url"]
+    }
+  },
+  async execute(params): Promise<ToolResult> {
+    try {
+      const report = evaluateHttpInspection(
+        {
+          url: String(params.url || "/"),
+          method: String(params.method || "GET"),
+          headers: params.headers || {},
+          body: typeof params.body === "string" ? params.body : "",
+          rawRequest: typeof params.rawRequest === "string" ? params.rawRequest : undefined,
+          rawResponse: typeof params.rawResponse === "string" ? params.rawResponse : undefined,
+        },
+        { learning: Boolean(params.learning) },
+      );
+      return { success: true, output: JSON.stringify(report, null, 2) };
+    } catch (err: any) {
+      return { success: false, output: "", error: `HTTP inspection failed: ${err.message}` };
+    }
   }
 };

@@ -372,7 +372,7 @@ export function renderLogoLines(options: LogoRenderOptions = {}): string[] {
   return lines;
 }
 
-export function formatBannerLines(version = "0.5151126", options: LogoRenderOptions = {}): string[] {
+export function formatBannerLines(version = "0.6.191126", options: LogoRenderOptions = {}): string[] {
   const logoLines = renderLogoLines(options);
   const nordAccent = (text: string) => {
     const mode = detectColorDepth(options.colorMode);
@@ -409,7 +409,7 @@ export function formatBannerLines(version = "0.5151126", options: LogoRenderOpti
   });
 }
 
-export function printBanner(version = "0.5151126") {
+export function printBanner(version = "0.6.191126") {
   console.log("");
   for (const line of formatBannerLines(version)) {
     console.log(line);

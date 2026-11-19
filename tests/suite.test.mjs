@@ -102,8 +102,12 @@ async function runTests() {
   await import("./database.test.mjs");
   await import("./cli-ux.test.mjs");
   await import("./security.test.mjs");
+  await import("./inspect.test.mjs");
+  await import("./crawler.test.mjs");
+  await import("./resilience.test.mjs");
   await import("./hook.test.mjs");
   await import("./fix.test.mjs");
+  await import("./trust.test.mjs");
 
   console.log("\nAll test suites passed successfully.");
 }

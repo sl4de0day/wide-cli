@@ -1,3 +1,5 @@
+import { NetworkPolicy } from "./crawler.js";
+import { inspectRawHttpResponse, normalizeEvasion } from "./inspect.js";
 import { getPayloadsForType } from "./payloads.js";
 
 export type FuzzLocation = "query" | "form" | "json" | "header" | "cookie" | "path";
@@ -7,6 +9,7 @@ export interface FuzzOptions {
   headers?: Record<string, string>;
   compareHeaders?: Record<string, string>;
   timeoutMs?: number;
+  allowPrivate?: boolean;
 }
 
 export interface FuzzFinding {
@@ -137,6 +140,27 @@ function detectEvidenceIndicator(
     return { hit: true, sqlErrorDetected: false, reflectionFound, indicator: "OS Command Execution Output Detected" };
   }
 
+  if (payloadType === "evasion") {
+    const decoded = normalizeEvasion(payload).value;
+    const hitEvasion = reflectionFound || (decoded.length > 0 && text.includes(decoded) && !baselineBody.includes(decoded));
+    if (hitEvasion) {
+      return { hit: true, sqlErrorDetected: false, reflectionFound, indicator: "Evasion Payload Decoded or Reflected" };
+    }
+    if (SQL_ERROR_PATTERNS.some((re) => re.test(text) && !re.test(baselineBody))) {
+      return { hit: true, sqlErrorDetected: true, reflectionFound, indicator: "SQL Error Triggered via Evasion Encoding" };
+    }
+  }
+
+  if (payloadType === "smuggling") {
+    const rawConf = inspectRawHttpResponse(text);
+    if (!rawConf.ok && rawConf.poisoningVectors.length > 0) {
+      return { hit: true, sqlErrorDetected: false, reflectionFound, indicator: `HTTP Response Splitting / Poisoning (${rawConf.poisoningVectors[0]})` };
+    }
+    if (reflectionFound || text.includes("X-Wide-Smuggle")) {
+      return { hit: true, sqlErrorDetected: false, reflectionFound: true, indicator: "HTTP Request Smuggling / CRLF Injection Reflected" };
+    }
+  }
+
   if (payloadType === "ssrf" && SSRF_MARKERS.some((re) => re.test(text) && !re.test(baselineBody))) {
     return { hit: true, sqlErrorDetected: false, reflectionFound, indicator: "Internal Metadata Response Exposed via SSRF" };
   }
@@ -155,6 +179,9 @@ export async function fuzzTargetEndpoint(
   method = "GET",
   options: FuzzOptions = {}
 ): Promise<FuzzReport> {
+  if (options.allowPrivate === false && !new NetworkPolicy({ allowPrivate: false }).allows(url)) {
+    throw new Error(`Blocked by Wide SSRF NetworkPolicy: ${url}`);
+  }
   const location: FuzzLocation = options.location || (method === "GET" || method === "HEAD" ? "query" : "form");
   const timeoutMs = options.timeoutMs || 10000;
   const payloads = payloadType.toLowerCase() === "idor"
@@ -162,7 +189,7 @@ export async function fuzzTargetEndpoint(
     : getPayloadsForType(payloadType);
 
   if (payloads.length === 0) {
-    throw new Error(`Unsupported payload type: '${payloadType}'. Available: sqli, xss, ssrf, traversal, cmd, ssti, idor.`);
+    throw new Error(`Unsupported payload type: '${payloadType}'. Available: sqli, xss, ssrf, traversal, cmd, ssti, idor, evasion, smuggling.`);
   }
 
   const baseReq = buildRequest(url, param, "testbaselinevalue123", method, location, options.headers, timeoutMs);

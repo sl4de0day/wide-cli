@@ -2,7 +2,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type ProviderName = "gemini" | "ollama" | "claude" | "deepseek" | "openai";
+export type ProviderName = "gemini" | "ollama" | "claude" | "claude-code" | "antigravity" | "codex" | "deepseek" | "openai";
+
+import type { CliToolMode } from "../tools/types.js";
 
 export interface WideConfig {
   provider: ProviderName;
@@ -18,6 +20,8 @@ export interface WideConfig {
   autoApproveWrite: boolean;
   autoApproveRun: boolean;
   maxIterations: number;
+  toolMode?: CliToolMode;
+  allowBrowser?: boolean;
 }
 
 const DEFAULT_CONFIG: WideConfig = {
@@ -29,14 +33,20 @@ const DEFAULT_CONFIG: WideConfig = {
   autoApproveWrite: true,
   autoApproveRun: false,
   maxIterations: 25,
+  toolMode: "full",
+  allowBrowser: true,
 };
 
 export function coerceConfigValue(key: string, raw: unknown): unknown {
   if (typeof raw !== "string") return raw;
   const trimmed = raw.trim();
-  if (key === "autoApproveRead" || key === "autoApproveWrite" || key === "autoApproveRun") {
+  if (key === "autoApproveRead" || key === "autoApproveWrite" || key === "autoApproveRun" || key === "allowBrowser") {
     if (trimmed === "true" || trimmed === "on" || trimmed === "1") return true;
     if (trimmed === "false" || trimmed === "off" || trimmed === "0") return false;
+  }
+  if (key === "toolMode") {
+    const mode = trimmed.toLowerCase();
+    if (mode === "full" || mode === "code" || mode === "security") return mode;
   }
   if (key === "maxIterations") {
     const parsed = Number(trimmed);
@@ -85,7 +95,7 @@ export class ConfigManager {
 
   public hasProviderCredentials(provider?: ProviderName): boolean {
     const target = provider || this.config.provider;
-    if (target === "ollama") return true;
+    if (target === "ollama" || target === "claude-code" || target === "antigravity" || target === "codex") return true;
     return Boolean(this.getApiKey(target));
   }
 

@@ -71,15 +71,17 @@ const program = new Command();
 program
   .name("wide")
   .description("Terminal-first autonomous AI coding and security agent for the Wide ecosystem")
-  .version("0.5.161126")
+  .version("0.6.191126")
   .option("-d, --debug", "Enable structured debug diagnostics to stderr")
   .option("-v, --verbose", "Enable verbose diagnostic logging")
   .argument("[prompt...]", "Optional initial prompt for the agent")
   .option("-p, --print", "Run a single prompt non-interactively and exit")
   .option("-c, --continue", "Resume the most recent saved interactive session")
   .option("-r, --resume [sessionId]", "Resume a saved interactive session by ID")
-  .option("--provider <provider>", "LLM provider to use (gemini, ollama, claude, deepseek, openai)")
+  .option("--provider <provider>", "LLM provider to use (gemini, ollama, claude, claude-code, antigravity, codex, deepseek, openai)")
   .option("-m, --model <model>", "Model name to use")
+  .option("--mode <mode>", "Tool mode to use (full, code, security)")
+  .option("--no-browser", "Disable interactive browser_* tools")
   .option("-y, --yes", "Auto-approve all file edits and non-destructive command executions")
   .hook("preAction", () => {
     const rootOpts = program.opts();
@@ -104,6 +106,18 @@ program
       console.log(pc.dim(`Loaded ${ws.rules.length} workspace rule(s) from .wide/rules`));
     }
 
+    if (options.mode !== undefined) {
+      const normalizedMode = String(options.mode).trim().toLowerCase();
+      if (normalizedMode !== "full" && normalizedMode !== "code" && normalizedMode !== "security") {
+        console.error(pc.red(`Error: Invalid --mode '${options.mode}'. Choose one of: full, code, security.`));
+        process.exit(1);
+      }
+      options.mode = normalizedMode;
+    }
+
+    const cliToolMode = options.mode as "full" | "code" | "security" | undefined;
+    const cliAllowBrowser = options.browser === false ? false : undefined;
+
     const nonInteractive = Boolean(options.print || pipedData);
     if (nonInteractive) {
       if (!userPrompt) {
@@ -118,7 +132,10 @@ program
           import("./tools/index.js"),
         ]);
         const provider = createProvider(options.provider, options.model);
-        const agent = new Agent(process.cwd(), provider);
+        const agent = new Agent(process.cwd(), provider, {
+          toolMode: cliToolMode,
+          allowBrowser: cliAllowBrowser,
+        });
         if (options.continue) {
           const latest = loadLatestSession();
           if (latest) agent.loadMessages(latest.messages);
@@ -130,7 +147,9 @@ program
           autoApproveWrite: options.yes ? true : undefined,
           autoApproveRun: options.yes ? true : undefined,
         });
-        await executeTool("browser_close", {}, { workingDirectory: process.cwd() });
+        if (agent.getAllowBrowser()) {
+          await executeTool("browser_close", {}, { workingDirectory: process.cwd() });
+        }
       } catch (err: any) {
         console.error(`${pc.red("Error:")} ${err.message}`);
         process.exit(1);
@@ -146,6 +165,8 @@ program
       overrideProvider: options.provider,
       overrideModel: options.model,
       autoApproveAll: Boolean(options.yes),
+      toolMode: cliToolMode,
+      allowBrowser: cliAllowBrowser,
     });
   });
 
@@ -183,7 +204,7 @@ program
   .option("--dry-run", "Preview proposed diffs without writing modifications to disk")
   .option("--suppress", "Only generate quick-fix suppressions (wide-ignore directives)")
   .option("--ai", "Use AI LLM provider to synthesize intelligent code remediation patches")
-  .option("--provider <provider>", "LLM provider override (gemini, ollama, claude, deepseek, openai)")
+  .option("--provider <provider>", "LLM provider override (gemini, ollama, claude, claude-code, antigravity, codex, deepseek, openai)")
   .option("-m, --model <model>", "Model name override")
   .action(async (targetPath = ".", opts) => {
     try {
@@ -218,7 +239,7 @@ program
       console.log(pc.green(`Synchronized ${ruleResult.count} security rules to ${ruleResult.path}`));
 
       console.log(pc.cyan("Checking for Wide CLI updates..."));
-      const currentVersion = "0.5151126";
+      const currentVersion = "0.6.191126";
       const res = await fetch("https://api.github.com/repos/sl4de0day/wide-cli/releases/latest", {
         headers: { "User-Agent": "Wide-CLI", Accept: "application/vnd.github+json" },
         signal: AbortSignal.timeout(10000)
@@ -295,6 +316,59 @@ program
   .action(async (url, param, type, opts) => {
     const { executeTool } = await import("./tools/index.js");
     const res = await executeTool("fuzz_endpoint", { url, param, payloadType: type, method: opts.method }, { workingDirectory: process.cwd() });
+    console.log(res.output);
+  });
+
+program
+  .command("crawl <url>")
+  .description("Crawl a web target with SSRF protection, PathTrie normalization, SimHash dedup, and passive audits")
+  .option("-d, --depth <n>", "Crawl depth limit", "3")
+  .option("-m, --max-pages <n>", "Maximum pages to crawl", "80")
+  .option("-s, --scope <mode>", "Scope mode (rdn, fqdn, dn)", "rdn")
+  .option("--allow-private", "Allow private/loopback addresses")
+  .option("--tls-profile <profile>", "TLS/browser profile (none, chrome, firefox, safari)", "none")
+  .action(async (url, opts) => {
+    const { executeTool } = await import("./tools/index.js");
+    const res = await executeTool(
+      "crawl_target",
+      {
+        url,
+        maxDepth: Number(opts.depth) || 3,
+        maxPages: Number(opts.maxPages) || 80,
+        fieldScope: opts.scope || "rdn",
+        allowPrivate: Boolean(opts.allowPrivate),
+        tlsProfile: opts.tlsProfile || "none"
+      },
+      { workingDirectory: process.cwd() }
+    );
+    if (!res.success && res.error) {
+      console.error(res.error);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(res.output);
+  });
+
+program
+  .command("inspect <url>")
+  .description("Inspect an HTTP request/wire frame for RFC 9112 smuggling, evasion decoding, lexical SQLi/XSS, and scored policy")
+  .option("-X, --method <method>", "HTTP method", "GET")
+  .option("-b, --body <body>", "Request body")
+  .option("--raw <wire>", "Raw HTTP/1.x wire request")
+  .option("--learn", "Generate dated exception drafts")
+  .action(async (url, opts) => {
+    const { executeTool } = await import("./tools/index.js");
+    const res = await executeTool(
+      "inspect_http_message",
+      {
+        url,
+        method: opts.method,
+        body: opts.body,
+        rawRequest: opts.raw,
+        learning: Boolean(opts.learn),
+      },
+      { workingDirectory: process.cwd() },
+    );
     console.log(res.output);
   });
 

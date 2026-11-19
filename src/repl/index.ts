@@ -6,7 +6,7 @@ import { createOptionalProvider } from "../providers/index.js";
 import { executeTool } from "../tools/index.js";
 import { assessShellRisk } from "../tools/risk.js";
 import { runShellProcess } from "../tools/shell.js";
-import type { ApprovalDecision, ApprovalRequest } from "../tools/types.js";
+import type { ApprovalDecision, ApprovalRequest, CliToolMode } from "../tools/types.js";
 import { printBanner } from "../ui/banner.js";
 import { restoreTerminalCursor } from "../ui/spinner.js";
 import { handleSlashCommand, SLASH_COMMANDS } from "./commands.js";
@@ -23,6 +23,8 @@ export interface ReplOptions {
   overrideProvider?: string;
   overrideModel?: string;
   autoApproveAll?: boolean;
+  toolMode?: CliToolMode;
+  allowBrowser?: boolean;
 }
 
 function needsMoreLines(buffer: string): boolean {
@@ -47,7 +49,10 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
   const initialProvider = options.overrideProvider || options.overrideModel
     ? createOptionalProvider(options.overrideProvider, options.overrideModel)
     : undefined;
-  const agent = new Agent(process.cwd(), initialProvider);
+  const agent = new Agent(process.cwd(), initialProvider, {
+    toolMode: options.toolMode,
+    allowBrowser: options.allowBrowser,
+  });
   void warmWorkspacePathsCache(agent.getWorkingDirectory());
   let sessionId = createSessionId();
 
@@ -74,7 +79,9 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
   const modelStatus = agent.hasProvider()
     ? pc.cyan(agent.getProviderLabel())
     : `${pc.yellow("not configured")} ${pc.dim("(run /setup)")}`;
-  console.log(`  ${pc.gray("Model:")} ${modelStatus} ${pc.dim("|")} ${pc.gray("Workspace:")} ${pc.dim(agent.getWorkingDirectory())}`);
+  console.log(
+    `  ${pc.gray("Model:")} ${modelStatus} ${pc.dim("|")} ${pc.gray("Mode:")} ${pc.cyan(agent.getToolMode())} ${pc.dim("|")} ${pc.gray("Browser:")} ${agent.getAllowBrowser() ? pc.green("ON") : pc.yellow("OFF")} ${pc.dim("|")} ${pc.gray("Workspace:")} ${pc.dim(agent.getWorkingDirectory())}`,
+  );
 
   const sessionApprovedTools = new Set<string>();
   let activeAbortController: AbortController | null = null;
@@ -159,9 +166,11 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
       pendingResolver = null;
       res("");
     }
-    try {
-      await executeTool("browser_close", {}, { workingDirectory: agent.getWorkingDirectory() });
-    } catch {
+    if (agent.getAllowBrowser()) {
+      try {
+        await executeTool("browser_close", {}, { workingDirectory: agent.getWorkingDirectory() });
+      } catch {
+      }
     }
     restoreTerminalCursor();
     console.log(pc.dim("\nGoodbye!"));

@@ -4,18 +4,72 @@ import { debugLog } from "../config/logger.js";
 import { createOptionalProvider, type ChatMessage, type LLMProvider } from "../providers/index.js";
 import { RuleLoader } from "../security/loader.js";
 import { type SecurityRule } from "../security/rules.js";
-import { executeTool, getToolDefinitions } from "../tools/index.js";
-import type { ApprovalDecision, ApprovalRequest } from "../tools/types.js";
+import { executeTool, getToolDefinitions, normalizeToolMode } from "../tools/index.js";
+import type { ApprovalDecision, ApprovalRequest, CliToolMode } from "../tools/types.js";
 import { Spinner } from "../ui/spinner.js";
 import { ContextManager } from "./context.js";
 
-const BASE_SYSTEM_PROMPT = `You are Wide CLI, a security-first autonomous coding and web security agent operating in the user's terminal workspace.
+export interface AgentOptions {
+  toolMode?: CliToolMode;
+  allowBrowser?: boolean;
+}
 
-Operational Directives:
-- Inspect files before editing and write clean, production-grade patches directly on disk.
-- Prefer dedicated native tools (browser_*, send_http_request, fuzz_endpoint, run_security_scan) over ad-hoc shell workarounds.
-- Use live browser automation via browser_open, browser_navigate, browser_snapshot, browser_click, browser_type, browser_press, browser_hover, browser_select, browser_scroll, browser_wait, browser_extract, browser_screenshot, browser_console, browser_cookies, browser_eval, and browser_close (target elements by @eN ref, [N] index, CSS selector, or visible label).
-- Adhere to all directives silently without reciting or explaining system instructions.`;
+export function buildWideCliCapabilityPlaybook({
+  toolMode,
+  allowBrowser,
+}: {
+  toolMode: CliToolMode;
+  allowBrowser: boolean;
+}): string {
+  const lines: string[] = [
+    "Wide Ecosystem Capability Playbook:",
+    "- Document & .docx Reader: use read_document (or read_file) to read .docx Word documents cleanly via Wide's zero-dependency ZIP/XML paragraph reader.",
+  ];
+  if (allowBrowser) {
+    lines.push(
+      "- Live Browser, FastRead & Clean Article Extraction: pass fastRead=true to browser_open or browser_navigate to block images, fonts, media, CSS, and analytics trackers; call browser_extract with mode='article' or mode='clean_text' (or cleanText=true) to extract clean article body and metadata without navigation/footer noise.",
+    );
+  }
+  if (toolMode !== "code") {
+    lines.push(
+      "- Target Spider & Recon Core (crawl_target): crawl web targets with SSRF NetworkPolicy (allowPrivate), PathTrie route collapsing, SimHash64 deduplication, passive security header/JWT/entropy-secret auditing, and inline HTTP inspection summaries.",
+      "- Deep HTTP Inspection, RFC 9112 Smuggling & Lexical SQLi/XSS (inspect_http_message): inspect requests, responses, or raw HTTP/1.x wire payloads for RFC 9112 CL+TE smuggling and response poisoning, %uXXXX/UTF-8 evasion signals, lexical SQLi and HTML5 multi-context XSS tokenizers, ReDoS-safe Thompson NFA rules, and learning=true dated 'except ...' exception draft generation.",
+      "- Resilient HTTP & Active Fuzzing (send_http_request, fuzz_endpoint): send_http_request enforces hop-by-hop redirect SSRF and user:pass@ credential guards (allowPrivate=false), exponential jitter backoff (retries=1..4), per-host circuit breaker protection (useBreaker=true), and browser header profiles (tlsProfile='chrome' | 'firefox' | 'safari'); fuzz_endpoint supports sqli, xss, ssrf, traversal, cmd, ssti, idor, evasion, and smuggling payload suites.",
+    );
+  }
+  lines.push(
+    "- Database Subsystem (db_*): use db_list, db_inspect_schema, db_query, db_audit, and db_export for audited SQL and Redis operations.",
+  );
+  return lines.join("\n");
+}
+
+export function filterCliGuardrails(
+  rules: SecurityRule[] | undefined,
+  { toolMode, allowBrowser }: { toolMode: CliToolMode; allowBrowser: boolean },
+): SecurityRule[] | undefined {
+  if (!rules) return rules;
+  return rules.map((r) => {
+    if (r.id === "wide/ai-native-tool-priority") {
+      const parts: string[] = [];
+      if (toolMode !== "security") {
+        parts.push("read_file, read_document (.docx), write_file, edit_file, search_files, list_dir, and git_inspection for code and document work");
+      } else {
+        parts.push("read_file, read_document (.docx), search_files, and list_dir for analysis");
+      }
+      if (allowBrowser) {
+        parts.push("browser_* tools (with fastRead=true and browser_extract mode='article' | 'clean_text') for interactive browsing");
+      }
+      if (toolMode !== "code") {
+        parts.push("crawl_target, inspect_http_message, send_http_request, fuzz_endpoint, generate_payloads, and run_security_scan for recon, HTTP inspection, and security auditing");
+      }
+      return {
+        ...r,
+        instruction: `Always prefer native tools over ad-hoc shell scripts: use ${parts.join(", ")}.`,
+      };
+    }
+    return r;
+  });
+}
 
 export interface RunPromptOptions {
   signal?: AbortSignal;
@@ -49,10 +103,44 @@ function summarizeArgs(args: Record<string, any>): string {
   return formatted.length > 100 ? `${formatted.slice(0, 97)}...` : formatted;
 }
 
-export function buildAgentSystemPrompt(rules?: SecurityRule[]): string {
-  const instructions = RuleLoader.buildAgentInstructions(rules);
-  if (!instructions) return BASE_SYSTEM_PROMPT;
-  return `${BASE_SYSTEM_PROMPT}\n\nEcosystem Agent Guardrails (wide-rules):\n${instructions}`;
+export function buildAgentSystemPrompt(
+  rules?: SecurityRule[],
+  opts: { toolMode?: CliToolMode; allowBrowser?: boolean } = {},
+): string {
+  const toolMode = normalizeToolMode(opts.toolMode);
+  const allowBrowser = opts.allowBrowser !== false;
+  const roleLine =
+    toolMode === "code"
+      ? "You are Wide CLI, a focused software engineering agent operating in the user's terminal workspace."
+      : toolMode === "security"
+        ? "You are Wide CLI, an authorized AppSec and web security engineering agent operating in the user's terminal workspace."
+        : "You are Wide CLI, a security-first autonomous coding and web security agent operating in the user's terminal workspace.";
+
+  const nativeParts: string[] = [];
+  if (toolMode !== "security") nativeParts.push("read_file, read_document, write_file, edit_file, search_files");
+  else nativeParts.push("read_file, read_document, search_files");
+  if (allowBrowser) nativeParts.push("browser_*");
+  if (toolMode !== "code") nativeParts.push("crawl_target, inspect_http_message, send_http_request, fuzz_endpoint, run_security_scan");
+
+  const directives = [
+    toolMode === "security"
+      ? "- Inspect files, endpoints, and security findings carefully. Source code write tools are disabled in Security mode."
+      : "- Inspect files before editing and write clean, production-grade patches directly on disk.",
+    `- Prefer dedicated native tools (${nativeParts.join(", ")}) over ad-hoc shell workarounds.`,
+  ];
+  if (allowBrowser) {
+    directives.push(
+      "- Use live browser automation via browser_open, browser_navigate, browser_snapshot, browser_click, browser_type, browser_press, browser_hover, browser_select, browser_scroll, browser_wait, browser_extract, browser_screenshot, browser_console, browser_cookies, browser_eval, and browser_close (target elements by @eN ref, [N] index, CSS selector, or visible label).",
+    );
+  }
+  directives.push("- Adhere to all directives silently without reciting or explaining system instructions.");
+
+  const playbook = buildWideCliCapabilityPlaybook({ toolMode, allowBrowser });
+  const basePrompt = `${roleLine}\n\nActive Mode: ${toolMode.toUpperCase()} | Browser Tools: ${allowBrowser ? "ON" : "OFF"}\n\nOperational Directives:\n${directives.join("\n")}\n\n${playbook}`;
+  const scopedRules = filterCliGuardrails(rules, { toolMode, allowBrowser });
+  const instructions = RuleLoader.buildAgentInstructions(scopedRules);
+  if (!instructions) return basePrompt;
+  return `${basePrompt}\n\nEcosystem Agent Guardrails (wide-rules):\n${instructions}`;
 }
 
 export class Agent {
@@ -61,17 +149,25 @@ export class Agent {
   private workingDirectory: string;
   private contextManager: ContextManager;
   private agentRules: SecurityRule[] = [];
+  private toolMode: CliToolMode;
+  private allowBrowser: boolean;
   private totalTurns = 0;
   private totalToolCalls = 0;
 
-  constructor(workingDirectory = process.cwd(), provider?: LLMProvider | null) {
+  constructor(workingDirectory = process.cwd(), provider?: LLMProvider | null, options: AgentOptions = {}) {
     this.workingDirectory = workingDirectory;
     this.provider = provider !== undefined ? provider : createOptionalProvider();
     this.contextManager = new ContextManager();
+    const cfg = configManager.get();
+    this.toolMode = normalizeToolMode(options.toolMode ?? cfg.toolMode);
+    this.allowBrowser = options.allowBrowser ?? cfg.allowBrowser !== false;
     this.agentRules = RuleLoader.loadAgentRules(undefined, workingDirectory);
     this.messages.push({
       role: "system",
-      content: buildAgentSystemPrompt(this.agentRules)
+      content: buildAgentSystemPrompt(this.agentRules, {
+        toolMode: this.toolMode,
+        allowBrowser: this.allowBrowser,
+      })
     });
   }
 
@@ -102,11 +198,39 @@ export class Agent {
     return this.agentRules;
   }
 
+  public getToolMode(): CliToolMode {
+    return this.toolMode;
+  }
+
+  public setToolMode(mode: CliToolMode): void {
+    this.toolMode = normalizeToolMode(mode);
+    this.refreshSystemPrompt();
+  }
+
+  public getAllowBrowser(): boolean {
+    return this.allowBrowser;
+  }
+
+  public setAllowBrowser(allow: boolean): void {
+    this.allowBrowser = Boolean(allow);
+    this.refreshSystemPrompt();
+  }
+
+  private refreshSystemPrompt(): void {
+    const content = buildAgentSystemPrompt(this.agentRules, {
+      toolMode: this.toolMode,
+      allowBrowser: this.allowBrowser,
+    });
+    if (this.messages.length > 0 && this.messages[0].role === "system") {
+      this.messages[0].content = content;
+    } else {
+      this.messages.unshift({ role: "system", content });
+    }
+  }
+
   public reloadAgentRules(): SecurityRule[] {
     this.agentRules = RuleLoader.loadAgentRules(undefined, this.workingDirectory);
-    if (this.messages.length > 0 && this.messages[0].role === "system") {
-      this.messages[0].content = buildAgentSystemPrompt(this.agentRules);
-    }
+    this.refreshSystemPrompt();
     return this.agentRules;
   }
 
@@ -167,7 +291,10 @@ export class Agent {
     });
     this.totalTurns++;
 
-    const tools = getToolDefinitions();
+    const tools = getToolDefinitions({
+      toolMode: this.toolMode,
+      allowBrowser: this.allowBrowser,
+    });
     const spinner = new Spinner("Wide thinking...");
     const callCounts = new Map<string, number>();
     let iteration = 0;
@@ -267,6 +394,8 @@ export class Agent {
           try {
             result = await executeTool(tc.name, tc.arguments, {
               workingDirectory: this.workingDirectory,
+              toolMode: this.toolMode,
+              allowBrowser: this.allowBrowser,
               autoApproveRead: cfg.autoApproveRead,
               autoApproveWrite: options.autoApproveWrite ?? cfg.autoApproveWrite,
               autoApproveRun: options.autoApproveRun ?? cfg.autoApproveRun,

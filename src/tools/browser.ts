@@ -6,6 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
+import { extractArticleFromHtml, shouldBlockFastReadRequest } from "./article.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
 
 export interface DOMElement {
@@ -839,9 +840,11 @@ export class HeadlessBrowserController {
   private consoleBuffer: BrowserConsoleEntry[] = [];
   private cookieJar = new Map<string, string>();
   private stealth = false;
+  private fastRead = false;
+  private pwRouteHooked = false;
   private harEntries: any[] = [];
   private harStartedAt = "";
-  private userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Wide-CLI/0.5151126";
+  private userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Wide-CLI/0.6.191126";
 
   public findSystemBrowserExecutable(): string | null {
     const candidates: string[] = [];
@@ -954,6 +957,8 @@ export class HeadlessBrowserController {
           await this.pwContext.addInitScript(CLI_STEALTH_INIT_SCRIPT);
         }
         this.pwPage = await this.pwContext.newPage();
+        this.pwRouteHooked = false;
+        await this.applyFastReadFilter();
         this.pwPage.on("console", (msg: any) => {
           this.pushConsoleEntry(msg.type(), msg.text());
         });
@@ -1025,6 +1030,7 @@ export class HeadlessBrowserController {
           this.cdp = session;
           this.state.mode = "cdp";
           this.state.stealth = this.stealth;
+          await this.applyFastReadFilter();
           return "cdp";
         } catch {
           await this.cleanupLiveDrivers();
@@ -1035,6 +1041,34 @@ export class HeadlessBrowserController {
     this.state.mode = "http";
     this.state.stealth = this.stealth;
     return "http";
+  }
+
+  private async applyFastReadFilter(fastRead?: boolean): Promise<void> {
+    if (typeof fastRead === "boolean") {
+      this.fastRead = fastRead;
+    }
+    if (this.pwPage && this.fastRead && !this.pwRouteHooked && typeof this.pwPage.route === "function") {
+      this.pwRouteHooked = true;
+      await this.pwPage
+        .route("**/*", (route: any) => {
+          if (this.fastRead) {
+            const req = route.request();
+            if (shouldBlockFastReadRequest(req.resourceType(), req.url())) {
+              return route.abort();
+            }
+          }
+          return route.continue();
+        })
+        .catch(() => {
+          this.pwRouteHooked = false;
+        });
+    }
+    if (this.cdp) {
+      const blocked = this.fastRead
+        ? ["*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.svg", "*.woff", "*.woff2", "*.ttf", "*.css", "*google-analytics*", "*doubleclick*"]
+        : [];
+      await this.cdp.send("Network.setBlockedURLs", { urls: blocked }).catch(() => {});
+    }
   }
 
   private pushConsoleEntry(level: string, text: string): void {
@@ -1219,21 +1253,26 @@ export class HeadlessBrowserController {
     return attrs;
   }
 
-  public async open(url?: string, opts?: { stealth?: boolean }): Promise<string> {
+  public async open(url?: string, opts?: { stealth?: boolean; fastRead?: boolean }): Promise<string> {
     if (typeof opts?.stealth === "boolean" && opts.stealth !== this.stealth) {
       await this.cleanupLiveDrivers();
       this.stealth = opts.stealth;
     }
+    if (typeof opts?.fastRead === "boolean") {
+      this.fastRead = opts.fastRead;
+    }
     const mode = await this.ensureLiveSession();
+    await this.applyFastReadFilter(opts?.fastRead);
     if (url && url.trim()) {
-      return this.navigate(url);
+      return this.navigate(url, { fastRead: opts?.fastRead });
     }
     return `Browser session initialized (engine: ${mode}, url: ${this.state.url}${this.stealth ? ", stealth: on" : ""}).`;
   }
 
-  public async navigate(url: string): Promise<string> {
+  public async navigate(url: string, opts?: { fastRead?: boolean }): Promise<string> {
     const target = this.normalizeTargetUrl(url);
     const mode = await this.ensureLiveSession();
+    await this.applyFastReadFilter(opts?.fastRead);
 
     if (mode === "playwright" && this.pwPage) {
       try {
@@ -1663,9 +1702,34 @@ export class HeadlessBrowserController {
     return `Waited ${ms}ms.`;
   }
 
-  public extract(query = ""): string {
+  public extract(query = "", mode = "text"): string {
     if (!this.state.rawHtml && !this.state.textContent) {
       return "No webpage currently loaded. Use browser_navigate first.";
+    }
+
+    const m = String(mode || "text").toLowerCase();
+    if (m === "article" || m === "clean_text") {
+      const article = extractArticleFromHtml(this.state.rawHtml || this.state.textContent, this.state.url);
+      if (m === "article") {
+        return JSON.stringify(
+          {
+            ...article,
+            cleanText: article.cleanText.slice(0, 14000),
+          },
+          null,
+          2,
+        );
+      }
+      const headerLines = [
+        `Page Title: ${article.title}`,
+        `Page URL: ${article.url || this.state.url}`,
+        article.author ? `Author: ${article.author}` : "",
+        article.date ? `Date: ${article.date}` : "",
+        article.description ? `Description: ${article.description}` : "",
+        "",
+        article.cleanText.slice(0, 16000),
+      ].filter(Boolean);
+      return headerLines.join("\n");
     }
 
     const lines: string[] = [
@@ -1872,7 +1936,8 @@ export const browserOpenTool: Tool = {
       type: "object",
       properties: {
         url: { type: "string", description: "Optional URL to open immediately." },
-        stealth: { type: "boolean", description: "Opt-in stealth evasion mode masking navigator.webdriver." }
+        stealth: { type: "boolean", description: "Opt-in stealth evasion mode masking navigator.webdriver." },
+        fastRead: { type: "boolean", description: "Abort images, fonts, stylesheets, media, and analytics trackers for fast reading." }
       },
       required: []
     }
@@ -1881,6 +1946,7 @@ export const browserOpenTool: Tool = {
     try {
       const result = await defaultBrowser.open(params.url, {
         stealth: typeof params.stealth === "boolean" ? params.stealth : undefined,
+        fastRead: typeof params.fastRead === "boolean" ? params.fastRead : undefined,
       });
       return { success: true, output: result };
     } catch (err: any) {
@@ -1896,14 +1962,17 @@ export const browserNavigateTool: Tool = {
     parameters: {
       type: "object",
       properties: {
-        url: { type: "string", description: "Target URL to visit (e.g. https://example.com)." }
+        url: { type: "string", description: "Target URL to visit (e.g. https://example.com)." },
+        fastRead: { type: "boolean", description: "Block heavy media/fonts/CSS/trackers during navigation." }
       },
       required: ["url"]
     }
   },
   async execute(params: Record<string, any>): Promise<ToolResult> {
     try {
-      const result = await defaultBrowser.navigate(params.url);
+      const result = await defaultBrowser.navigate(params.url, {
+        fastRead: typeof params.fastRead === "boolean" ? params.fastRead : undefined,
+      });
       return { success: true, output: result };
     } catch (err: any) {
       return { success: false, output: "", error: `Navigation error: ${err.message}` };
@@ -2094,18 +2163,21 @@ export const browserWaitTool: Tool = {
 export const browserExtractTool: Tool = {
   definition: {
     name: "browser_extract",
-    description: "Extract text content or search for specific keywords from the currently loaded page.",
+    description: "Extract clean article content/metadata (article/clean_text) or search text from the currently loaded page.",
     parameters: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Optional search query or term to filter extracted content." }
+        query: { type: "string", description: "Optional search query or term to filter extracted content." },
+        mode: { type: "string", enum: ["text", "article", "clean_text"], description: "Extraction mode. Use 'article' or 'clean_text' to strip navigation/footer boilerplate." },
+        cleanText: { type: "boolean", description: "Shorthand for clean_text article extraction." }
       },
       required: []
     }
   },
   async execute(params: Record<string, any>): Promise<ToolResult> {
     try {
-      const result = defaultBrowser.extract(params.query || "");
+      const mode = params.mode || (params.cleanText ? "clean_text" : "text");
+      const result = defaultBrowser.extract(params.query || "", mode);
       return { success: true, output: result };
     } catch (err: any) {
       return { success: false, output: "", error: `Extract error: ${err.message}` };

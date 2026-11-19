@@ -1,5 +1,8 @@
 import { configManager, type ProviderName } from "../config/index.js";
+import { AntigravityProvider } from "./antigravity.js";
 import { ClaudeProvider } from "./claude.js";
+import { ClaudeCodeProvider } from "./claude-code.js";
+import { CodexProvider } from "./codex.js";
 import { GeminiProvider } from "./gemini.js";
 import { listOllamaModels, OllamaProvider } from "./ollama.js";
 import { OpenAICompatibleProvider } from "./openai.js";
@@ -9,6 +12,26 @@ export const PROVIDER_PRESETS: Record<ProviderName, string[]> = {
   gemini: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
   ollama: ["deepseek-r1:7b", "qwen2.5-coder:7b", "llama3.1:8b"],
   claude: ["claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022"],
+  "claude-code": ["default", "sonnet", "opus", "haiku"],
+  antigravity: [
+    "default",
+    "gemini-4-neon-high",
+    "gemini-4-neon-xhigh",
+    "gemini-4-argon-high",
+    "gemini-4-hydrogen-high",
+    "gemini-3.8-flash-high",
+    "claude-sonnet-5-5-high",
+    "claude-opus-5-5-high",
+    "gpt-oss-120b-medium",
+  ],
+  codex: [
+    "default",
+    "gpt-6.2-sol",
+    "gpt-6.2-sol-xhigh",
+    "gpt-6.2-astra",
+    "gpt-6-luna",
+    "gpt-5.5",
+  ],
   deepseek: ["deepseek-chat", "deepseek-reasoner"],
   openai: ["gpt-4o", "gpt-4o-mini"],
 };
@@ -38,6 +61,18 @@ export function createProvider(overrideProvider?: string, overrideModel?: string
     return new ClaudeProvider(key, modelName || "claude-3-7-sonnet-20250219");
   }
 
+  if (providerType === "claude-code") {
+    return new ClaudeCodeProvider(modelName || "default");
+  }
+
+  if (providerType === "antigravity") {
+    return new AntigravityProvider(modelName || "default");
+  }
+
+  if (providerType === "codex") {
+    return new CodexProvider(modelName || "default");
+  }
+
   if (providerType === "deepseek") {
     const key = configManager.getApiKey("deepseek");
     if (!key) {
@@ -54,7 +89,7 @@ export function createProvider(overrideProvider?: string, overrideModel?: string
     return new OpenAICompatibleProvider("openai", key, modelName || "gpt-4o", "https://api.openai.com/v1");
   }
 
-  throw new Error(`Unsupported provider: '${providerType}'. Supported: gemini, ollama, claude, deepseek, openai.`);
+  throw new Error(`Unsupported provider: '${providerType}'. Supported: gemini, ollama, claude, claude-code, antigravity, codex, deepseek, openai.`);
 }
 
 export function createOptionalProvider(overrideProvider?: string, overrideModel?: string): LLMProvider | null {

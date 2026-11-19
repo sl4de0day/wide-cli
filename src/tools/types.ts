@@ -1,4 +1,5 @@
 export type ApprovalDecision = "once" | "always" | "deny";
+export type CliToolMode = "full" | "code" | "security";
 
 export interface ApprovalRequest {
   tool: string;
@@ -26,6 +27,9 @@ export interface ToolDefinition {
 
 export interface ToolExecutionContext {
   workingDirectory: string;
+  toolMode?: CliToolMode;
+  allowBrowser?: boolean;
+  strictValidation?: boolean;
   autoApproveRead?: boolean;
   autoApproveWrite?: boolean;
   autoApproveRun?: boolean;

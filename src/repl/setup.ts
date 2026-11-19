@@ -11,8 +11,11 @@ const PROVIDER_CHOICES: Array<{ index: string; name: ProviderName; label: string
   { index: "1", name: "gemini", label: "Gemini (Google AI)", needsKey: true },
   { index: "2", name: "ollama", label: "Ollama (Local models)", needsKey: false },
   { index: "3", name: "claude", label: "Claude (Anthropic)", needsKey: true },
-  { index: "4", name: "deepseek", label: "DeepSeek", needsKey: true },
-  { index: "5", name: "openai", label: "OpenAI", needsKey: true },
+  { index: "4", name: "claude-code", label: "Claude Code (Subscription, no API key)", needsKey: false },
+  { index: "5", name: "antigravity", label: "Google Antigravity (CLI sign-in, no API key)", needsKey: false },
+  { index: "6", name: "codex", label: "OpenAI Codex (ChatGPT subscription, no API key)", needsKey: false },
+  { index: "7", name: "deepseek", label: "DeepSeek", needsKey: true },
+  { index: "8", name: "openai", label: "OpenAI", needsKey: true },
 ];
 
 export async function runInteractiveSetup(ask: PromptQuestionFn, agent: Agent, isFirstLaunch = false): Promise<boolean> {
@@ -33,6 +36,12 @@ export async function runInteractiveSetup(ask: PromptQuestionFn, agent: Agent, i
       note = ollama.reachable
         ? pc.green(` (running, ${ollama.models.length} model(s))`)
         : pc.dim(" (not detected on localhost:11434)");
+    } else if (item.name === "claude-code") {
+      note = pc.dim(" (uses local claude CLI login)");
+    } else if (item.name === "antigravity") {
+      note = pc.dim(" (uses local agy CLI login)");
+    } else if (item.name === "codex") {
+      note = pc.dim(" (uses local codex ChatGPT login)");
     } else if (configManager.getApiKey(item.name as ApiKeyProvider)) {
       note = pc.green(" (key saved)");
     }
@@ -40,7 +49,7 @@ export async function runInteractiveSetup(ask: PromptQuestionFn, agent: Agent, i
   }
   console.log(`  ${pc.cyan("0")}. ${pc.dim("Skip for now (use /scan, /rules, /help, !shell)")}\n`);
 
-  const selection = (await ask(`  ${pc.cyan("Provider [1-5, Enter to skip]:")} `)).trim();
+  const selection = (await ask(`  ${pc.cyan("Provider [1-6, Enter to skip]:")} `)).trim();
   if (!selection || selection === "0" || selection.toLowerCase() === "skip") {
     console.log(pc.dim("  Skipped setup. Run /setup or /key <provider> <key> anytime.\n"));
     return false;
@@ -53,7 +62,7 @@ export async function runInteractiveSetup(ask: PromptQuestionFn, agent: Agent, i
     return false;
   }
 
-  if (chosen.needsKey && chosen.name !== "ollama") {
+  if (chosen.needsKey && chosen.name !== "ollama" && chosen.name !== "claude-code" && chosen.name !== "antigravity" && chosen.name !== "codex") {
     const keyProvider = chosen.name as ApiKeyProvider;
     const existing = configManager.getApiKey(keyProvider);
     const keyPrompt = existing

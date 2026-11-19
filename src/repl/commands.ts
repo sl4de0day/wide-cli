@@ -30,10 +30,11 @@ export const SLASH_COMMANDS: SlashCommandMeta[] = [
   { command: "/key", usage: "/key <provider> [apiKey]", description: "Configure API key without leaving CLI" },
   { command: "/config", usage: "/config", description: "Show current configuration" },
   { command: "/approve", usage: "/approve [read|write|run] [on|off]", description: "Inspect or toggle tool approval policy" },
+  { command: "/mode", usage: "/mode [full|code|security]", description: "Inspect or switch assistant tool mode" },
   { command: "/scan", usage: "/scan [path]", description: "Run Wide SAST security scan in workspace" },
   { command: "/rules", usage: "/rules [list|sync]", description: "Inspect or synchronize wide-rules" },
   { command: "/db", usage: "/db [list|connect|schema|erd|query|export|history|audit]", description: "Manage databases, inspect schemas, export data, and run queries" },
-  { command: "/browser", usage: "/browser [status|close]", description: "Inspect or close browser session" },
+  { command: "/browser", usage: "/browser [on|off|status|close]", description: "Toggle browser tools or inspect/close browser session" },
   { command: "/cd", usage: "/cd <directory>", description: "Change active workspace directory" },
   { command: "/compact", usage: "/compact", description: "Compact conversation context" },
   { command: "/sessions", usage: "/sessions", description: "List saved chat sessions" },
@@ -52,7 +53,7 @@ export interface CommandContext {
   onExit: () => Promise<void>;
 }
 
-const VALID_PROVIDERS: ProviderName[] = ["gemini", "ollama", "claude", "deepseek", "openai"];
+const VALID_PROVIDERS: ProviderName[] = ["gemini", "ollama", "claude", "claude-code", "antigravity", "codex", "deepseek", "openai"];
 
 function printHelp(): void {
   console.log(`\n${pc.bold("Slash Commands:")}`);
@@ -201,6 +202,12 @@ export async function handleSlashCommand(trimmed: string, ctx: CommandContext): 
     ctx.agent.setProvider(instance);
     if (instance) {
       console.log(`${pc.green("[OK]")} Provider switched to ${pc.cyan(`${prov}/${nextModel}`)}\n`);
+    } else if (prov === "claude-code") {
+      console.log(`${pc.yellow("[WARN]")} Provider set to '${prov}'. Run ${pc.cyan("claude auth login")} in your terminal to sign in.\n`);
+    } else if (prov === "antigravity") {
+      console.log(`${pc.yellow("[WARN]")} Provider set to '${prov}'. Run ${pc.cyan("agy")} in your terminal to sign in.\n`);
+    } else if (prov === "codex") {
+      console.log(`${pc.yellow("[WARN]")} Provider set to '${prov}'. Run ${pc.cyan("codex login")} in your terminal to sign in.\n`);
     } else {
       console.log(`${pc.yellow("[WARN]")} Provider set to '${prov}' (${nextModel}). Run ${pc.cyan(`/key ${prov} <YOUR_KEY>`)} to authenticate.\n`);
     }
@@ -214,7 +221,7 @@ export async function handleSlashCommand(trimmed: string, ctx: CommandContext): 
 
   if (cmd === "/key") {
     const prov = (parts[1] || configManager.get().provider).toLowerCase() as ProviderName;
-    if (!VALID_PROVIDERS.includes(prov) || prov === "ollama") {
+    if (!VALID_PROVIDERS.includes(prov) || prov === "ollama" || prov === "claude-code" || prov === "antigravity" || prov === "codex") {
       console.log(`Usage: ${pc.cyan("/key <gemini|claude|deepseek|openai> [apiKey]")}\n`);
       return true;
     }
@@ -296,11 +303,50 @@ export async function handleSlashCommand(trimmed: string, ctx: CommandContext): 
     return true;
   }
 
+  if (cmd === "/mode") {
+    const requested = parts[1]?.toLowerCase();
+    if (!requested) {
+      console.log(`\n${pc.bold("Assistant Tool Mode:")} ${pc.cyan(ctx.agent.getToolMode())}`);
+      console.log(`  Usage: ${pc.cyan("/mode <full|code|security>")}\n`);
+      return true;
+    }
+    if (requested !== "full" && requested !== "code" && requested !== "security") {
+      console.log(`${pc.yellow("[WARN]")} Invalid mode '${parts[1]}'. Choose: full, code, or security.\n`);
+      return true;
+    }
+    ctx.agent.setToolMode(requested);
+    configManager.set("toolMode", requested);
+    console.log(`${pc.green("[OK]")} Tool mode switched to ${pc.cyan(requested)}.\n`);
+    return true;
+  }
+
   if (cmd === "/browser") {
     const sub = (parts[1] || "status").toLowerCase();
+    if (sub === "on" || sub === "enable") {
+      ctx.agent.setAllowBrowser(true);
+      configManager.set("allowBrowser", true);
+      console.log(`${pc.green("[OK]")} Browser tools ${pc.cyan("ON")}.\n`);
+      return true;
+    }
+    if (sub === "off" || sub === "disable") {
+      ctx.agent.setAllowBrowser(false);
+      configManager.set("allowBrowser", false);
+      try {
+        await executeTool("browser_close", {}, { workingDirectory: ctx.agent.getWorkingDirectory() });
+      } catch {
+      }
+      console.log(`${pc.green("[OK]")} Browser tools ${pc.yellow("OFF")}.\n`);
+      return true;
+    }
     if (sub === "close") {
       const res = await executeTool("browser_close", {}, { workingDirectory: ctx.agent.getWorkingDirectory() });
       console.log(`${pc.green("[OK]")} ${res.output}\n`);
+      return true;
+    }
+    const enabled = ctx.agent.getAllowBrowser();
+    console.log(`${pc.dim("Browser Toggle:")} ${enabled ? pc.green("ON") : pc.yellow("OFF")}`);
+    if (!enabled) {
+      console.log(`Use ${pc.cyan("/browser on")} to enable browser automation tools.\n`);
       return true;
     }
     const res = await executeTool("browser_extract", { selector: "body" }, { workingDirectory: ctx.agent.getWorkingDirectory() });
@@ -372,6 +418,7 @@ export async function handleSlashCommand(trimmed: string, ctx: CommandContext): 
     console.log(`\n${pc.bold("Session Status:")}`);
     console.log(`  Session ID:   ${pc.cyan(ctx.sessionId)}`);
     console.log(`  Provider:     ${pc.cyan(`${cfg.provider}/${cfg.model}`)} ${ctx.agent.hasProvider() ? pc.green("(ready)") : pc.yellow("(unconfigured)")}`);
+    console.log(`  Mode:         ${pc.cyan(ctx.agent.getToolMode())} ${pc.dim("|")} Browser: ${ctx.agent.getAllowBrowser() ? pc.green("ON") : pc.yellow("OFF")}`);
     console.log(`  Workspace:    ${pc.dim(ctx.agent.getWorkingDirectory())}`);
     console.log(`  History:      ${stats.turns} turns, ${stats.toolCalls} tool calls, ${stats.messageCount} messages`);
     console.log(`  Agent Rules:  ${stats.ruleCount} active rule(s)\n`);
