@@ -168,7 +168,7 @@ export class SecurityScanner {
           tool: {
             driver: {
               name: "Wide Security Scanner",
-              version: "0.6.191126",
+              version: "0.7.211126",
               rules: [...rulesMap.values()]
             }
           },

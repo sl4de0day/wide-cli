@@ -1,7 +1,7 @@
 {
   "name": "wide-cli",
-  "version": "0.6.191126",
-  "description": "Terminal-first autonomous AI coding & security agent for the Wide ecosystem",
+  "version": "0.7.211126",
+  "description": "Wide's AI coding and web security agents in your terminal",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -18,7 +18,9 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build",
-    "sync:bundle": "node scripts/sync-bundle.mjs",
+    "sync:bundle": "node scripts/sync-bundle.mjs && node scripts/sync-engine.mjs",
+    "sync:engine": "node scripts/sync-engine.mjs",
+    "check:engine": "node scripts/sync-engine.mjs --check",
     "dev": "tsc && node dist/index.js",
     "start": "node bin/wide.js",
     "test": "node tests/suite.test.mjs",

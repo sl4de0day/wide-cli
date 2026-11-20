@@ -844,7 +844,7 @@ export class HeadlessBrowserController {
   private pwRouteHooked = false;
   private harEntries: any[] = [];
   private harStartedAt = "";
-  private userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Wide-CLI/0.6.191126";
+  private userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Wide-CLI/0.7.211126";
 
   public findSystemBrowserExecutable(): string | null {
     const candidates: string[] = [];

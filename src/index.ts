@@ -70,8 +70,8 @@ const program = new Command();
 
 program
   .name("wide")
-  .description("Terminal-first autonomous AI coding and security agent for the Wide ecosystem")
-  .version("0.6.191126")
+  .description("Wide's AI coding and web security agents in your terminal")
+  .version("0.7.211126")
   .option("-d, --debug", "Enable structured debug diagnostics to stderr")
   .option("-v, --verbose", "Enable verbose diagnostic logging")
   .argument("[prompt...]", "Optional initial prompt for the agent")
@@ -239,7 +239,7 @@ program
       console.log(pc.green(`Synchronized ${ruleResult.count} security rules to ${ruleResult.path}`));
 
       console.log(pc.cyan("Checking for Wide CLI updates..."));
-      const currentVersion = "0.6.191126";
+      const currentVersion = "0.7.211126";
       const res = await fetch("https://api.github.com/repos/sl4de0day/wide-cli/releases/latest", {
         headers: { "User-Agent": "Wide-CLI", Accept: "application/vnd.github+json" },
         signal: AbortSignal.timeout(10000)
