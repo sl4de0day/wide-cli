@@ -12,7 +12,6 @@ export function isDocxPath(filePath: string): boolean {
 
 function decodeXmlEntities(input: string): string {
   return input
-    .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
@@ -24,7 +23,8 @@ function decodeXmlEntities(input: string): string {
     .replace(/&#x([0-9a-f]+);/gi, (_m, hex) => {
       const c = Number.parseInt(hex, 16);
       return Number.isFinite(c) && c > 0 && c <= 0x10ffff ? String.fromCodePoint(c) : "";
-    });
+    })
+    .replace(/&amp;/g, "&");
 }
 
 function extractEntryFromCentralDirectory(buf: Buffer, targetName: string): { method: number; data: Buffer } | null {

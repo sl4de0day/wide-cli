@@ -473,7 +473,7 @@ export async function startCliToolBridge(getTools: () => ToolDefinition[]): Prom
             autoApproveRun: cfg.autoApproveRun,
           });
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({ result: out.output, isError: !out.success }));
+          res.end(JSON.stringify({ result: String(out.output || out.error || ""), isError: !out.success }));
         } catch (err: any) {
           res.writeHead(500, { "content-type": "application/json" });
           res.end(JSON.stringify({ result: String(err?.message || err), isError: true }));
@@ -818,6 +818,14 @@ export class ClaudeCodeProvider implements LLMProvider {
       shell: spec.shell,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    this.proc.on("error", (err) => {
+      if (this.activeTurnFinish) {
+        const finish = this.activeTurnFinish;
+        this.activeTurnFinish = null;
+        finish({ content: "", error: String(err?.message || err) });
+      }
+      this.proc = null;
+    });
     this.stdoutBuf = "";
 
     this.proc.stdout.on("data", (chunk) => {
@@ -897,6 +905,11 @@ export class ClaudeCodeProvider implements LLMProvider {
         }
       };
 
+      this.activeTurnFinish = (res) => {
+        cleanup();
+        resolveTurn(res);
+      };
+
       if (signal) {
         if (signal.aborted) {
           onAbort();
@@ -904,11 +917,6 @@ export class ClaudeCodeProvider implements LLMProvider {
         }
         signal.addEventListener("abort", onAbort, { once: true });
       }
-
-      this.activeTurnFinish = (res) => {
-        cleanup();
-        resolveTurn(res);
-      };
 
       const line = JSON.stringify({
         type: "user",

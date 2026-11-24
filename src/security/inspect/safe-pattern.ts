@@ -102,6 +102,9 @@ function parseEscapeChar(pat: string, pos: number): { ch: number; nextPos: numbe
   if (c >= "1" && c <= "9") {
     failPattern("BackreferenceUnsupported", `backreference \\${c} rejected to prevent exponential backtracking`);
   }
+  if (c === "b" || c === "B") {
+    failPattern("InvalidEscape", `word boundary \\${c} is unsupported in Thompson NFA`);
+  }
   if ("dDwWsS".includes(c)) return { ch: -1, nextPos: pos + 1, shorthand: c };
   if (c === "n") return { ch: 0x0a, nextPos: pos + 1 };
   if (c === "r") return { ch: 0x0d, nextPos: pos + 1 };
@@ -403,21 +406,113 @@ class RegexCompiler {
   }
 }
 
-function extractSimpleLiterals(pattern: string, caseInsensitive: boolean): string[] {
-  const parts = pattern.replace(/^\(\?[ims]+\)/i, "").split("|");
-  if (parts.length > 1) {
-    const lits = parts.map((p) => p.replace(/[^A-Za-z0-9_./:-]/g, "")).filter((l) => l.length >= 3); // wide-ignore wide/flagsan-dash-permissive-sanitizer
-    return lits.length === parts.length ? lits.map((l) => (caseInsensitive ? l.toLowerCase() : l)) : [];
-  }
-  const runs = pattern.match(/[A-Za-z0-9_./:-]{3,}/g) || [];
+function extractBranchBestLiteral(branch: string): string {
   let best = "";
-  for (const r of runs) {
-    const idx = pattern.indexOf(r);
-    const nextChar = pattern[idx + r.length];
-    if (nextChar === "*" || nextChar === "?" || nextChar === "{") continue;
-    if (r.length > best.length) best = r;
+  let cur = "";
+  let inClass = false;
+  let depth = 0;
+
+  const flush = () => {
+    if (cur.length > best.length) best = cur;
+    cur = "";
+  };
+
+  const isOptionalNext = (idx: number): boolean => {
+    const ch = branch[idx];
+    return ch === "*" || ch === "?" || (ch === "{" && /^\{\s*0\s*(?:,|\})/.test(branch.slice(idx, idx + 12)));
+  };
+
+  for (let i = 0; i < branch.length; i += 1) {
+    const c = branch[i];
+    if (inClass) {
+      if (c === "\\") { i += 1; continue; }
+      if (c === "]") inClass = false;
+      continue;
+    }
+    if (c === "[") {
+      flush();
+      inClass = true;
+      continue;
+    }
+    if (c === "(") {
+      flush();
+      depth += 1;
+      continue;
+    }
+    if (c === ")") {
+      flush();
+      if (depth > 0) depth -= 1;
+      continue;
+    }
+    if (depth > 0) {
+      if (c === "\\") i += 1;
+      continue;
+    }
+    if (c === "\\") {
+      if (i + 1 >= branch.length) { flush(); break; }
+      const next = branch[i + 1];
+      if ("dDwWsSbB0123456789xXuUpPkKc".includes(next)) {
+        flush();
+        i += 1;
+        continue;
+      }
+      if (isOptionalNext(i + 2)) {
+        flush();
+        i += 1;
+        continue;
+      }
+      cur += next;
+      i += 1;
+      continue;
+    }
+    if (".^$*+?{}|".includes(c)) {
+      flush();
+      continue;
+    }
+    if (isOptionalNext(i + 1)) {
+      flush();
+      continue;
+    }
+    cur += c;
   }
-  if (!best) return [];
+  flush();
+  return best;
+}
+
+function extractSimpleLiterals(pattern: string, caseInsensitive: boolean): string[] {
+  const clean = pattern.replace(/^\(\?[ims]+\)/i, "");
+  const parts: string[] = [];
+  let depth = 0;
+  let inClass = false;
+  let escaped = false;
+  let start = 0;
+  for (let i = 0; i < clean.length; i += 1) {
+    const c = clean[i];
+    if (escaped) { escaped = false; continue; }
+    if (c === "\\") { escaped = true; continue; }
+    if (c === "[" && !inClass) { inClass = true; continue; }
+    if (c === "]" && inClass) { inClass = false; continue; }
+    if (inClass) continue;
+    if (c === "(") depth += 1;
+    else if (c === ")" && depth > 0) depth -= 1;
+    else if (c === "|" && depth === 0) {
+      parts.push(clean.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(clean.slice(start));
+
+  if (parts.length > 1) {
+    const lits: string[] = [];
+    for (const p of parts) {
+      const lit = extractBranchBestLiteral(p);
+      if (lit.length < 3) return [];
+      lits.push(caseInsensitive ? lit.toLowerCase() : lit);
+    }
+    return lits;
+  }
+  const best = extractBranchBestLiteral(clean);
+  if (best.length < 3) return [];
   return [caseInsensitive ? best.toLowerCase() : best];
 }
 
@@ -534,9 +629,181 @@ interface AcNode {
   out: Array<{ ruleId: number; len: number }>;
 }
 
+function isUnboundedQuantifierAt(pattern: string, index: number): boolean {
+  const ch = pattern[index];
+  if (ch === "*" || ch === "+") return true;
+  if (ch === "{") {
+    const rest = pattern.slice(index, index + 16);
+    if (/^\{\s*\d+\s*,\s*\}/.test(rest)) return true;
+  }
+  return false;
+}
+
+function splitTopLevelAlternations(str: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let inClass = false;
+  let escaped = false;
+  let start = 0;
+  for (let i = 0; i < str.length; i += 1) {
+    const c = str[i];
+    if (escaped) { escaped = false; continue; }
+    if (c === "\\") { escaped = true; continue; }
+    if (c === "[" && !inClass) { inClass = true; continue; }
+    if (c === "]" && inClass) { inClass = false; continue; }
+    if (inClass) continue;
+    if (c === "(") depth += 1;
+    else if (c === ")" && depth > 0) depth -= 1;
+    else if (c === "|" && depth === 0) {
+      parts.push(str.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(str.slice(start));
+  return parts;
+}
+
+function hasNoNestedRepeat(fragment: string): boolean {
+  let inClass = false;
+  let escaped = false;
+  const hasQuantInGroup: boolean[] = [];
+  for (let i = 0; i < fragment.length; i += 1) {
+    const c = fragment[i];
+    if (escaped) { escaped = false; continue; }
+    if (c === "\\") { escaped = true; continue; }
+    if (c === "[" && !inClass) { inClass = true; continue; }
+    if (c === "]" && inClass) { inClass = false; continue; }
+    if (inClass) continue;
+    if (c === "(") {
+      hasQuantInGroup.push(false);
+    } else if (c === ")") {
+      const innerQ = hasQuantInGroup.pop() || false;
+      if (innerQ && isUnboundedQuantifierAt(fragment, i + 1)) return false;
+      if (hasQuantInGroup.length > 0 && innerQ) {
+        hasQuantInGroup[hasQuantInGroup.length - 1] = true;
+      }
+    } else if ((c === "*" || c === "+") && hasQuantInGroup.length > 0) {
+      hasQuantInGroup[hasQuantInGroup.length - 1] = true;
+    }
+  }
+  return true;
+}
+
+function isSelfDelimitedBranch(branch: string, allBranches: string[]): boolean {
+  if (!branch || !hasNoNestedRepeat(branch)) return false;
+  const trimmed = branch.replace(/^(?:\\s\*)+/, "");
+  if (trimmed === "\\\\.") return true;
+  if (/^\[\^[^\]]*\]$/.test(trimmed)) return true;
+  if (/^\\\[[^\]*+]*\\\]$/.test(trimmed) || (trimmed.startsWith("\\[") && trimmed.endsWith("\\]"))) return true;
+  if (trimmed.startsWith("\\(") && trimmed.includes("\\)") && (allBranches.includes("[^()]") || trimmed.endsWith("\\)") || trimmed.endsWith("]*"))) {
+    return true;
+  }
+  if (trimmed.startsWith("\\.") || trimmed.startsWith("(?:->|\\.)") || trimmed.startsWith("\\->") || trimmed.startsWith("\\/")) {
+    return true;
+  }
+  if (/^,(?:\\s\*)*(?:\(\?:)?(?:['"`\\])/.test(trimmed)) {
+    return true;
+  }
+  if (trimmed.endsWith("\\/") && !trimmed.slice(0, -2).includes("/")) {
+    return true;
+  }
+  if (branch.startsWith("(?:") && branch.endsWith(")")) {
+    return isDisjointRepeatedGroup(branch);
+  }
+  return false;
+}
+
+function isDisjointRepeatedGroup(groupBody: string): boolean {
+  const body = groupBody.startsWith("?:") ? groupBody.slice(2) : groupBody;
+  if (/\.\*|\.\+/.test(body)) return false;
+  const branches = splitTopLevelAlternations(body);
+  if (branches.length === 0) return false;
+  if (branches.length === 1 && body === "0\\s*,\\s*") return true;
+  return branches.every((branch) => isSelfDelimitedBranch(branch, branches));
+}
+
+function hasStarHeightOverOne(patternStr: string): boolean {
+  let inClass = false;
+  let escaped = false;
+  const stack: Array<{ startIndex: number; hasUnboundedInner: boolean }> = [];
+  for (let i = 0; i < patternStr.length; i += 1) {
+    const c = patternStr[i];
+    if (escaped) { escaped = false; continue; }
+    if (c === "\\") { escaped = true; continue; }
+    if (c === "[" && !inClass) { inClass = true; continue; }
+    if (c === "]" && inClass) { inClass = false; continue; }
+    if (inClass) continue;
+    if (c === "(") {
+      stack.push({ startIndex: i, hasUnboundedInner: false });
+    } else if (c === ")") {
+      const top = stack.pop();
+      if (!top) continue;
+      const outerUnbounded = isUnboundedQuantifierAt(patternStr, i + 1);
+      const groupBody = patternStr.slice(top.startIndex + 1, i);
+      const safeDisjoint = outerUnbounded && isDisjointRepeatedGroup(groupBody);
+      if (top.hasUnboundedInner && outerUnbounded && !safeDisjoint) {
+        return true;
+      }
+      if (stack.length > 0 && (top.hasUnboundedInner || (outerUnbounded && !safeDisjoint))) {
+        stack[stack.length - 1].hasUnboundedInner = true;
+      }
+    } else if ((c === "*" || c === "+") && stack.length > 0) {
+      stack[stack.length - 1].hasUnboundedInner = true;
+    } else if (c === "{" && stack.length > 0) {
+      if (isUnboundedQuantifierAt(patternStr, i)) {
+        stack[stack.length - 1].hasUnboundedInner = true;
+      }
+    }
+  }
+  return false;
+}
+
+function hasUnsafeBackreference(patternStr: string): boolean {
+  if (!/\\(\d+)/.test(patternStr)) return false;
+  const captures: string[] = [];
+  let inClass = false;
+  let escaped = false;
+  const openStack: Array<{ start: number; captureIdx: number }> = [];
+  for (let i = 0; i < patternStr.length; i += 1) {
+    const c = patternStr[i];
+    if (escaped) { escaped = false; continue; }
+    if (c === "\\") { escaped = true; continue; }
+    if (c === "[" && !inClass) { inClass = true; continue; }
+    if (c === "]" && inClass) { inClass = false; continue; }
+    if (inClass) continue;
+    if (c === "(") {
+      const isCapturing = patternStr[i + 1] !== "?";
+      const captureIdx = isCapturing ? captures.length : -1;
+      if (isCapturing) captures.push("");
+      openStack.push({ start: i, captureIdx });
+    } else if (c === ")" && openStack.length > 0) {
+      const frame = openStack.pop()!;
+      if (frame.captureIdx >= 0) {
+        captures[frame.captureIdx] = patternStr.slice(frame.start + 1, i);
+      }
+    }
+  }
+  const wildcardMatches = patternStr.match(/(?:\.\*|\.\+|\(\?:\(?!\\\d+\)\.\)\*)/g) || [];
+  if (wildcardMatches.length >= 3) return true;
+  const refRe = /\\([1-9]\d*)(?:([+*?])|\{\s*\d+\s*,\s*\})?/g;
+  let match: RegExpExecArray | null;
+  while ((match = refRe.exec(patternStr)) !== null) {
+    const idx = Number(match[1]) - 1;
+    const quant = match[2] || (match[0].includes("{") ? "{" : "");
+    if (quant === "+" || quant === "*" || quant === "{") return true;
+    const body = captures[idx] ?? "";
+    if (!body) return true;
+    const isSingleCharSet = /^\[[^\]^]+\]$|^\[[^\]^]+\]\??$/.test(body) && !/[+*]/.test(body);
+    if (/\.\*|\.\+/.test(body)) return true;
+    if (!isSingleCharSet && /[*+]/.test(patternStr.slice(Math.max(0, match.index - 24), match.index))) {
+      if (/\(\?:\.\*\)/.test(patternStr)) return true;
+    }
+  }
+  return false;
+}
+
 export function hasNestedQuantifiers(pattern: string): boolean {
-  const groupHasRepeat = /\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*[+*{]/.test(pattern);
-  return groupHasRepeat || /\\[1-9]/.test(pattern);
+  return hasStarHeightOverOne(pattern) || hasUnsafeBackreference(pattern);
 }
 
 export function testUserRegexSafe(

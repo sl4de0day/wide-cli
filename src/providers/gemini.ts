@@ -25,9 +25,11 @@ export class GeminiProvider implements LLMProvider {
     const systemMsg = messages.find(m => m.role === "system");
     const chatMsgs = messages.filter(m => m.role !== "system");
 
-    const contents = chatMsgs.map(m => {
+    const contents: any[] = [];
+    for (const m of chatMsgs) {
       if (m.role === "user") {
-        return { role: "user", parts: [{ text: m.content }] };
+        contents.push({ role: "user", parts: [{ text: m.content }] });
+        continue;
       }
       if (m.role === "assistant") {
         const parts: any[] = [];
@@ -42,21 +44,26 @@ export class GeminiProvider implements LLMProvider {
             });
           }
         }
-        return { role: "model", parts };
+        contents.push({ role: "model", parts });
+        continue;
       }
       if (m.role === "tool") {
-        return {
-          role: "user",
-          parts: [{
-            functionResponse: {
-              name: m.name || "tool_result",
-              response: { output: m.content }
-            }
-          }]
+        const part = {
+          functionResponse: {
+            name: m.name || "tool_result",
+            response: { output: m.content }
+          }
         };
+        const prev = contents[contents.length - 1];
+        if (prev && prev.role === "user" && Array.isArray(prev.parts) && prev.parts[0]?.functionResponse) {
+          prev.parts.push(part);
+        } else {
+          contents.push({ role: "user", parts: [part] });
+        }
+        continue;
       }
-      return { role: "user", parts: [{ text: m.content }] };
-    });
+      contents.push({ role: "user", parts: [{ text: m.content }] });
+    }
 
     const functionDeclarations = tools.map(t => ({
       name: t.name,

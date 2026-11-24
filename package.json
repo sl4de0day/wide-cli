@@ -1,6 +1,6 @@
 {
   "name": "wide-cli",
-  "version": "0.7.211126",
+  "version": "0.8.241126",
   "description": "Wide's AI coding and web security agents in your terminal",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

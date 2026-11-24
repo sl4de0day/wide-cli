@@ -25,18 +25,21 @@ export class ClaudeProvider implements LLMProvider {
     const systemMsg = messages.find(m => m.role === "system");
     const chatMsgs = messages.filter(m => m.role !== "system");
 
-    const anthropicMessages = chatMsgs.map(m => {
+    const anthropicMessages: any[] = [];
+    for (const m of chatMsgs) {
       if (m.role === "tool") {
-        return {
-          role: "user",
-          content: [
-            {
-              type: "tool_result",
-              tool_use_id: m.toolCallId || "tool_call",
-              content: m.content
-            }
-          ]
+        const block = {
+          type: "tool_result",
+          tool_use_id: m.toolCallId || "tool_call",
+          content: m.content
         };
+        const prev = anthropicMessages[anthropicMessages.length - 1];
+        if (prev && prev.role === "user" && Array.isArray(prev.content) && prev.content[0]?.type === "tool_result") {
+          prev.content.push(block);
+        } else {
+          anthropicMessages.push({ role: "user", content: [block] });
+        }
+        continue;
       }
       if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
         const contentBlocks: any[] = [];
@@ -51,10 +54,11 @@ export class ClaudeProvider implements LLMProvider {
             input: tc.arguments
           });
         }
-        return { role: "assistant", content: contentBlocks };
+        anthropicMessages.push({ role: "assistant", content: contentBlocks });
+        continue;
       }
-      return { role: m.role, content: m.content };
-    });
+      anthropicMessages.push({ role: m.role, content: m.content });
+    }
 
     const anthropicTools = tools.map(t => ({
       name: t.name,

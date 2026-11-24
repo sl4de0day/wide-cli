@@ -13,24 +13,45 @@ export class ContextManager {
       return messages;
     }
 
-    const systemMsg = messages[0];
-    const initialUserMsg = messages.find((m, i) => i > 0 && m.role === "user");
-    let sliceStart = Math.max(1, messages.length - 10);
-    while (sliceStart > 1 && messages[sliceStart]?.role === "tool") {
+    const systemMsg = messages[0]?.role === "system" ? messages[0] : undefined;
+    const body = messages.filter((m, i) => !(i === 0 && m.role === "system") && m.role !== "system");
+    if (body.length === 0) return systemMsg ? [systemMsg] : [];
+
+    let sliceStart = Math.max(0, body.length - 10);
+    while (sliceStart > 0 && body[sliceStart].role === "tool") {
       sliceStart--;
     }
-    const recentMessages = messages.slice(sliceStart);
+    if (body[sliceStart]?.role === "assistant" && sliceStart > 0 && body[sliceStart - 1].role === "user") {
+      sliceStart--;
+    }
+    const recentMessages = body.slice(sliceStart);
+    const initialUserMsg = body.find((m) => m.role === "user");
 
     const compacted: ChatMessage[] = [];
-    if (systemMsg) compacted.push(systemMsg);
-    if (initialUserMsg && !recentMessages.includes(initialUserMsg)) {
-      compacted.push(initialUserMsg);
+    const compactionNote = "[Context Compaction] Earlier tool interactions were summarized to preserve context window limits. Continue with current objective.";
+    if (systemMsg) {
+      compacted.push({
+        role: "system",
+        content: systemMsg.content.includes("[Context Compaction]")
+          ? systemMsg.content
+          : `${systemMsg.content}\n\n${compactionNote}`
+      });
+    } else {
+      compacted.push({ role: "system", content: compactionNote });
     }
 
-    compacted.push({
-      role: "system",
-      content: "[Context Compaction] Earlier tool interactions were summarized to preserve context window limits. Continue with current objective."
-    });
+    if (initialUserMsg && sliceStart > 0 && !recentMessages.includes(initialUserMsg)) {
+      if (recentMessages[0]?.role === "user") {
+        recentMessages[0] = {
+          ...recentMessages[0],
+          content: `[Initial Request]\n${initialUserMsg.content}\n\n[Latest Request]\n${recentMessages[0].content}`
+        };
+      } else {
+        compacted.push(initialUserMsg);
+      }
+    } else if (recentMessages[0]?.role === "assistant") {
+      compacted.push({ role: "user", content: "Continue with the current objective." });
+    }
 
     for (const msg of recentMessages) {
       if (msg.role === "tool" && msg.content.length > 2000) {

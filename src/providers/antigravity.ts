@@ -141,6 +141,14 @@ function whereExecutable(name: string): Promise<string> {
   });
 }
 
+export interface AntigravityStatus {
+  installed: boolean;
+  signedIn: boolean;
+  version: string;
+  path: string;
+  models: string[];
+}
+
 export async function antigravityBinaryPath(): Promise<string> {
   const override = String(process.env.WIDE_AGY_PATH ?? "").trim();
   if (override) {
@@ -154,18 +162,27 @@ export async function antigravityBinaryPath(): Promise<string> {
     process.platform === "win32"
       ? [
           process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "agy", "bin", "agy.exe") : "",
+          join(home, "AppData", "Local", "agy", "bin", "agy.exe"),
+          join(home, ".agy", "bin", "agy.exe"),
           join(home, ".local", "bin", "agy.exe"),
+          join(home, ".gemini", "bin", "agy.exe"),
+          join(home, ".gemini", "antigravity", "bin", "agy.exe"),
+          process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "Programs", "agy", "agy.exe") : "",
+          process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "Programs", "Antigravity", "bin", "agy.exe") : "",
           join(home, "AppData", "Local", "Programs", "agy", "agy.exe"),
+          join(home, "AppData", "Local", "Programs", "Antigravity", "bin", "agy.exe"),
+          process.env.APPDATA ? join(process.env.APPDATA, "npm", "agy.cmd") : "",
         ]
       : [
           join(home, ".local", "bin", "agy"),
           join(home, ".agy", "bin", "agy"),
+          join(home, ".gemini", "bin", "agy"),
           "/usr/local/bin/agy",
           "/opt/homebrew/bin/agy",
           "/usr/bin/agy",
         ];
 
-  for (const candidate of candidates) {
+  for (const candidate of new Set(candidates)) {
     if (candidate && existsSync(candidate)) {
       try {
         if (statSync(candidate).isFile()) return candidate;
@@ -173,8 +190,11 @@ export async function antigravityBinaryPath(): Promise<string> {
     }
   }
 
-  const found = await whereExecutable("agy");
-  if (found && existsSync(found)) return found;
+  const names = process.platform === "win32" ? ["agy", "agy.exe", "agy.cmd"] : ["agy"];
+  for (const name of names) {
+    const found = await whereExecutable(name);
+    if (found && existsSync(found)) return found;
+  }
   return "";
 }
 
@@ -186,6 +206,117 @@ function buildSpawnSpec(binPath: string, args: string[]): { command: string; arg
     return { command: "cmd.exe", args: ["/d", "/c", binPath, ...args], shell: false };
   }
   return { command: binPath, args, shell: false };
+}
+
+function execCapture(
+  binPath: string,
+  args: string[],
+  timeoutMs: number,
+): Promise<{ ok: boolean; stdout: string; stderr: string; timedOut: boolean }> {
+  const spec = buildSpawnSpec(binPath, args);
+  return new Promise((resolveCapture) => {
+    let settled = false;
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolveCapture({ ok, stdout, stderr, timedOut });
+    };
+    try {
+      const child = spawn(spec.command, spec.args, {
+        windowsHide: true,
+        shell: spec.shell,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        try {
+          child.kill("SIGKILL");
+        } catch {}
+        finish(false);
+      }, timeoutMs);
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString("utf8");
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString("utf8");
+      });
+      child.on("error", () => {
+        clearTimeout(timer);
+        finish(false);
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        finish(!timedOut && code === 0);
+      });
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+export function parseAntigravityModelIds(stdout: string): string[] {
+  const ids: string[] = [];
+  for (const rawLine of String(stdout ?? "").split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || /^fetching\b/i.test(trimmed)) continue;
+    const id = String(trimmed.split(/\t+/)[0] ?? "").trim();
+    if (!id || /\s/.test(id) || id.startsWith("-")) continue;
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+function hasLocalAntigravityAuthFile(): boolean {
+  const home = homedir();
+  const candidates = [
+    join(home, ".gemini", "antigravity", "antigravity_state.pbtxt"),
+    join(home, ".gemini", "antigravity-cli", "jetski_state.pbtxt"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const st = statSync(candidate);
+      if (st.isFile() && st.size > 0) return true;
+    } catch {}
+  }
+  return false;
+}
+
+export async function checkAntigravityStatus(binPath?: string): Promise<AntigravityStatus> {
+  const exe = binPath || (await antigravityBinaryPath());
+  if (!exe) {
+    return { installed: false, signedIn: false, version: "", path: "", models: [] };
+  }
+  const [verRes, modelsRes] = await Promise.all([
+    execCapture(exe, ["--version"], 5000),
+    execCapture(exe, ["models"], 15000),
+  ]);
+  const versionText = `${verRes.stdout}\n${verRes.stderr}`.trim();
+  const versionMatch = /v?(\d+\.\d+(?:\.\d+)*)/i.exec(versionText);
+  const version = versionMatch ? versionMatch[1] : versionText.split(/\r?\n/)[0]?.trim() || "";
+  const models = parseAntigravityModelIds(modelsRes.stdout);
+  const combinedErr = `${modelsRes.stdout}\n${modelsRes.stderr}`.toLowerCase();
+  const isAuthError =
+    !modelsRes.ok &&
+    /(not\s+logged\s+in|not\s+authenticated|unauthenticated|sign\s+in|login\s+required|unauthorized|401)/i.test(
+      combinedErr,
+    );
+  const signedIn = isAuthError
+    ? false
+    : modelsRes.ok && models.length > 0
+      ? true
+      : modelsRes.ok || modelsRes.timedOut
+        ? hasLocalAntigravityAuthFile()
+        : false;
+  return {
+    installed: true,
+    signedIn,
+    version,
+    path: exe,
+    models,
+  };
 }
 
 export class AntigravityProvider implements LLMProvider {
@@ -351,6 +482,14 @@ export class AntigravityProvider implements LLMProvider {
       shell: spec.shell,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    this.proc.on("error", (err) => {
+      if (this.activeTurnFinish) {
+        const finish = this.activeTurnFinish;
+        this.activeTurnFinish = null;
+        finish({ content: "", error: String(err?.message || err) });
+      }
+      this.proc = null;
+    });
     this.stdoutBuf = "";
 
     this.proc.stdout.on("data", (chunk) => {
@@ -433,6 +572,11 @@ export class AntigravityProvider implements LLMProvider {
         }
       };
 
+      this.activeTurnFinish = (res) => {
+        cleanup();
+        resolveTurn(res);
+      };
+
       if (signal) {
         if (signal.aborted) {
           onAbort();
@@ -440,11 +584,6 @@ export class AntigravityProvider implements LLMProvider {
         }
         signal.addEventListener("abort", onAbort, { once: true });
       }
-
-      this.activeTurnFinish = (res) => {
-        cleanup();
-        resolveTurn(res);
-      };
 
       const line = JSON.stringify({
         event: "user",

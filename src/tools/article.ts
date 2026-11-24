@@ -45,7 +45,6 @@ export function shouldBlockFastReadRequest(resourceType: string, reqUrl: string)
 function decodeHtmlEntities(input: string): string {
   return input
     .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, '"')
@@ -57,7 +56,8 @@ function decodeHtmlEntities(input: string): string {
     .replace(/&#x([0-9a-f]+);/gi, (_m, hex) => {
       const code = Number.parseInt(hex, 16);
       return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : "";
-    });
+    })
+    .replace(/&amp;/gi, "&");
 }
 
 function parseTagAttrs(raw: string): Record<string, string> {

@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, openSync, readSync, closeSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, extname, join, relative, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import pc from "picocolors";
 import { debugLog } from "../config/logger.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
@@ -721,8 +721,9 @@ export async function executeDatabaseQuery(
 
       if (kind === "sqlite") {
         const trimmed = query.trim();
-        if (isQueryReadOnly(trimmed, "sqlite") && !trimmed.includes(";")) {
-          const stmt = db.prepare(trimmed);
+        const singleStmt = trimmed.replace(/;+$/, "").trim();
+        if (isQueryReadOnly(singleStmt, "sqlite") && !singleStmt.includes(";")) {
+          const stmt = db.prepare(singleStmt);
           const rawRows = stmt.all();
           const truncated = rawRows.length > maxRows;
           const sliced = truncated ? rawRows.slice(0, maxRows) : rawRows;
@@ -1258,18 +1259,18 @@ export async function handleDbCommand(
       console.log(`Usage: ${pc.cyan("/db remove <id|name>")}\n`);
       return;
     }
-    const before = store.connections.length;
-    store.connections = store.connections.filter((c) => c.id !== targetId && c.name !== targetId);
-    if (store.connections.length === before) {
+    const target = store.connections.find((c) => c.id === targetId || c.name === targetId);
+    if (!target) {
       console.log(`${pc.red("Error:")} Saved connection '${targetId}' not found.\n`);
       return;
     }
-    if (store.activeId === targetId) {
+    store.connections = store.connections.filter((c) => c.id !== target.id);
+    if (store.activeId === target.id) {
       store.activeId = store.connections[0]?.id;
     }
     saveStore(store);
-    saveSecret(targetId, undefined);
-    console.log(`${pc.green("[OK]")} Removed database connection '${targetId}'.\n`);
+    saveSecret(target.id, undefined);
+    console.log(`${pc.green("[OK]")} Removed database connection '${target.name}' (${target.id}).\n`);
     return;
   }
 
@@ -1434,7 +1435,7 @@ export async function handleDbCommand(
       if (outPath) {
         const target = resolve(ctx.workingDirectory, outPath);
         const rel = relative(ctx.workingDirectory, target);
-        if (rel.startsWith("..") || rel === "") {
+        if (isAbsolute(rel) || rel.startsWith("..") || rel === "") {
           console.log(`${pc.red("Error:")} Export path must stay inside workspace.\n`);
           return;
         }

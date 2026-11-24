@@ -188,6 +188,7 @@ async function runTrustTests() {
     AntigravityProvider,
     AntigravityStreamAccumulator,
     buildAntigravityCliArgs,
+    checkAntigravityStatus,
   } = await import("../dist/providers/antigravity.js");
 
   const agyPlanArgs = buildAntigravityCliArgs({
@@ -232,6 +233,8 @@ async function runTrustTests() {
   try {
     const mockAgyCli = join(tmpAgy, "mock-agy.js");
     const mockAgyBody = [
+      "if (process.argv.includes('--version')) { process.stdout.write('1.5.14\\n'); process.exit(0); }",
+      "if (process.argv.includes('models')) { process.stdout.write('gemini-4-neon-high\\tGemini 4 Neon (High)\\nclaude-sonnet-5-5-high\\tClaude Sonnet 5.5 (High)\\n'); process.exit(0); }",
       "const readline = require('node:readline');",
       "const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });",
       "rl.on('line', (line) => {",
@@ -245,6 +248,12 @@ async function runTrustTests() {
     ].join("\n");
     writeFileSync(mockAgyCli, mockAgyBody, "utf8");
     process.env.WIDE_AGY_PATH = mockAgyCli;
+
+    const agySt = await checkAntigravityStatus();
+    assert.strictEqual(agySt.installed, true);
+    assert.strictEqual(agySt.signedIn, true);
+    assert.strictEqual(agySt.version, "1.5.14");
+    assert.ok(agySt.models.includes("gemini-4-neon-high") && agySt.models.includes("claude-sonnet-5-5-high"));
 
     const ac1 = [];
     const ar1 = await agyProvider.chatStream(

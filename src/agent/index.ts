@@ -245,7 +245,13 @@ export class Agent {
   public loadMessages(saved: ChatMessage[]): void {
     const rest = saved.filter((m) => m.role !== "system");
     this.messages = [
-      { role: "system", content: buildAgentSystemPrompt(this.agentRules) },
+      {
+        role: "system",
+        content: buildAgentSystemPrompt(this.agentRules, {
+          toolMode: this.toolMode,
+          allowBrowser: this.allowBrowser,
+        }),
+      },
       ...rest,
     ];
   }
@@ -271,7 +277,10 @@ export class Agent {
     this.totalToolCalls = 0;
     this.messages = [{
       role: "system",
-      content: buildAgentSystemPrompt(this.agentRules)
+      content: buildAgentSystemPrompt(this.agentRules, {
+        toolMode: this.toolMode,
+        allowBrowser: this.allowBrowser,
+      })
     }];
   }
 

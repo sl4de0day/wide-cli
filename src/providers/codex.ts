@@ -360,6 +360,19 @@ export class CodexProvider implements LLMProvider {
       shell: spec.shell,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    this.proc.on("error", (err) => {
+      for (const entry of this.pendingRpc.values()) {
+        clearTimeout(entry.timer);
+        entry.reject(err instanceof Error ? err : new Error(String(err)));
+      }
+      this.pendingRpc.clear();
+      if (this.activeTurnFinish) {
+        const finish = this.activeTurnFinish;
+        this.activeTurnFinish = null;
+        finish({ content: "", error: String(err?.message || err) });
+      }
+      this.proc = null;
+    });
 
     const handleLine = (raw: string) => {
       const trimmed = raw.trim();
@@ -553,6 +566,11 @@ export class CodexProvider implements LLMProvider {
         }
       };
 
+      this.activeTurnFinish = (res) => {
+        cleanup();
+        resolveTurn(res);
+      };
+
       if (signal) {
         if (signal.aborted) {
           onAbort();
@@ -560,11 +578,6 @@ export class CodexProvider implements LLMProvider {
         }
         signal.addEventListener("abort", onAbort, { once: true });
       }
-
-      this.activeTurnFinish = (res) => {
-        cleanup();
-        resolveTurn(res);
-      };
 
       this.rpcCall("turn/start", {
         threadId: this.threadId,
@@ -818,6 +831,9 @@ export class CodexProvider implements LLMProvider {
       this.dispose();
       this.threadId = "";
       this.syncedMessageCount = 0;
+      if (mcpTools.length > 0) {
+        this.bridge = await startCliToolBridge(() => this.activeTools);
+      }
       this.spawnWorker(binPath, sig, allowDiskWrites);
       await this.initializeWorkerAndThread(allowDiskWrites, systemMsg, "");
       const retryPrompt = this.formatPrompt(systemMsg, messages, lastUserIdx, true);

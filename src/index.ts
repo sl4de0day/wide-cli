@@ -71,7 +71,7 @@ const program = new Command();
 program
   .name("wide")
   .description("Wide's AI coding and web security agents in your terminal")
-  .version("0.7.211126")
+  .version("0.8.241126")
   .option("-d, --debug", "Enable structured debug diagnostics to stderr")
   .option("-v, --verbose", "Enable verbose diagnostic logging")
   .argument("[prompt...]", "Optional initial prompt for the agent")
@@ -192,6 +192,11 @@ program
       },
       { workingDirectory: process.cwd() }
     );
+    if (!res.success && res.error) {
+      console.error(pc.red(res.error));
+      process.exitCode = 1;
+      return;
+    }
     console.log(res.output);
   });
 
@@ -239,7 +244,7 @@ program
       console.log(pc.green(`Synchronized ${ruleResult.count} security rules to ${ruleResult.path}`));
 
       console.log(pc.cyan("Checking for Wide CLI updates..."));
-      const currentVersion = "0.7.211126";
+      const currentVersion = "0.8.241126";
       const res = await fetch("https://api.github.com/repos/sl4de0day/wide-cli/releases/latest", {
         headers: { "User-Agent": "Wide-CLI", Accept: "application/vnd.github+json" },
         signal: AbortSignal.timeout(10000)
@@ -306,6 +311,11 @@ program
   .action(async (type) => {
     const { executeTool } = await import("./tools/index.js");
     const res = await executeTool("generate_payloads", { type }, { workingDirectory: process.cwd() });
+    if (!res.success && res.error) {
+      console.error(pc.red(res.error));
+      process.exitCode = 1;
+      return;
+    }
     console.log(res.output);
   });
 
@@ -316,6 +326,11 @@ program
   .action(async (url, param, type, opts) => {
     const { executeTool } = await import("./tools/index.js");
     const res = await executeTool("fuzz_endpoint", { url, param, payloadType: type, method: opts.method }, { workingDirectory: process.cwd() });
+    if (!res.success && res.error) {
+      console.error(pc.red(res.error));
+      process.exitCode = 1;
+      return;
+    }
     console.log(res.output);
   });
 
@@ -369,6 +384,11 @@ program
       },
       { workingDirectory: process.cwd() },
     );
+    if (!res.success && res.error) {
+      console.error(pc.red(res.error));
+      process.exitCode = 1;
+      return;
+    }
     console.log(res.output);
   });
 

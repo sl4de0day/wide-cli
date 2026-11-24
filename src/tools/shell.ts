@@ -164,7 +164,7 @@ export const runCommandTool: Tool = {
 
     const risk = assessShellRisk(cmd);
     const sessionAutoAllowed = !risk.destructive && context.sessionApprovedTools?.has("run_command");
-    const needsApproval = risk.destructive ? Boolean(context.requestApproval || !context.autoApproveRun) : (!context.autoApproveRun && !sessionAutoAllowed);
+    const needsApproval = risk.destructive ? true : (!context.autoApproveRun && !sessionAutoAllowed);
 
     if (needsApproval) {
       if (!context.requestApproval) {

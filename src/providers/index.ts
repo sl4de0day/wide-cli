@@ -1,7 +1,7 @@
 import { configManager, type ProviderName } from "../config/index.js";
-import { AntigravityProvider } from "./antigravity.js";
+import { AntigravityProvider, checkAntigravityStatus } from "./antigravity.js";
 import { ClaudeProvider } from "./claude.js";
-import { ClaudeCodeProvider } from "./claude-code.js";
+import { checkClaudeCodeAuth, ClaudeCodeProvider } from "./claude-code.js";
 import { CodexProvider } from "./codex.js";
 import { GeminiProvider } from "./gemini.js";
 import { listOllamaModels, OllamaProvider } from "./ollama.js";
@@ -104,5 +104,5 @@ export function isProviderConfigured(provider?: ProviderName): boolean {
   return configManager.hasProviderCredentials(provider);
 }
 
-export { listOllamaModels };
+export { checkAntigravityStatus, checkClaudeCodeAuth, listOllamaModels };
 export * from "./types.js";

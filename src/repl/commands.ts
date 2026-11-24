@@ -349,7 +349,7 @@ export async function handleSlashCommand(trimmed: string, ctx: CommandContext): 
       console.log(`Use ${pc.cyan("/browser on")} to enable browser automation tools.\n`);
       return true;
     }
-    const res = await executeTool("browser_extract", { selector: "body" }, { workingDirectory: ctx.agent.getWorkingDirectory() });
+    const res = await executeTool("browser_extract", {}, { workingDirectory: ctx.agent.getWorkingDirectory() });
     if (res.success) {
       console.log(`${pc.green("[OK]")} Active browser session:\n${res.output.slice(0, 600)}\n`);
     } else {

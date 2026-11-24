@@ -370,15 +370,17 @@ export class RuleLoader {
         if (hasNestedQuantifiers(String(item.pattern))) continue;
         try {
           const notMatchRaw = item["not-match"] || item.notMatch;
-          const safeNotMatch =
-            typeof notMatchRaw === "string" && notMatchRaw && !hasNestedQuantifiers(notMatchRaw)
-              ? new RegExp(notMatchRaw, "i")
-              : undefined;
+          let safeNotMatch: RegExp | undefined;
+          if (typeof notMatchRaw === "string" && notMatchRaw) {
+            if (hasNestedQuantifiers(notMatchRaw)) continue;
+            safeNotMatch = new RegExp(notMatchRaw, "i");
+          }
           const srcRaw = item["source-pattern"];
-          const safeSource =
-            typeof srcRaw === "string" && srcRaw && !hasNestedQuantifiers(srcRaw)
-              ? new RegExp(srcRaw, "i")
-              : undefined;
+          let safeSource: RegExp | undefined;
+          if (typeof srcRaw === "string" && srcRaw) {
+            if (hasNestedQuantifiers(srcRaw)) continue;
+            safeSource = new RegExp(srcRaw, "i");
+          }
           const rule: SecurityRule = {
             id: item.id,
             cwe: item.cwe || "N/A",

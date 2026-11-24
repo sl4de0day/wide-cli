@@ -1,5 +1,5 @@
 const KNOWN_SECRET_PREFIX_RE = /^(?:AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z\-_]{30,}|sk-(?:proj-|ant-)?[A-Za-z0-9\-_]{20,}|xox[baprs]-[0-9A-Za-z-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/;
-const KNOWN_TOKEN_INLINE_RE = /\b(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z\-_]{30,}|sk-(?:proj-|ant-)?[A-Za-z0-9\-_]{20,}|xox[baprs]-[0-9A-Za-z-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/;
+const KNOWN_TOKEN_INLINE_RE = /(?:\b(?:AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z\-_]{30,}|sk-(?:proj-|ant-)?[A-Za-z0-9\-_]{20,}|xox[baprs]-[0-9A-Za-z-]{10,})|-----BEGIN [A-Z ]*PRIVATE KEY-----)/;
 const KNOWN_PREFIX_DUMMY_RE = /(?:example|dummy|placeholder|your[_-]|changeme|replace[_-]?me|xxxxxx|000000)/i;
 const PLACEHOLDER_RE = /(?:example|sample|dummy|placeholder|your[_-]|changeme|replace[_-]?me|test[_-]?(?:key|token|secret)|fake|redacted|localhost|000000|123456|xxxxxx|\$\{\{?|<[A-Z0-9_]+>)/i;
 const ENV_REFERENCE_RE = /process\.env\.|os\.environ|import\.meta\.env\.|\$\{\{?\s*secrets\./i;

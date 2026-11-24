@@ -136,10 +136,20 @@ export async function runPreCommitHook(opts: HookRunOptions = {}): Promise<{
   const failOn = (opts.failOn || "HIGH").toUpperCase();
   const minRank = SEVERITY_RANKS[failOn] || 3;
 
+  let repoRoot = cwd;
+  try {
+    const top = execSync("git rev-parse --show-toplevel", {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    if (top) repoRoot = top;
+  } catch {}
+
   let stagedRaw = "";
   try {
     stagedRaw = execSync("git diff --cached --name-only --diff-filter=ACMR", {
-      cwd,
+      cwd: repoRoot,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
@@ -157,13 +167,13 @@ export async function runPreCommitHook(opts: HookRunOptions = {}): Promise<{
     return { blocked: false, findings: [], totalFilesScanned: 0 };
   }
 
-  const existingFiles = stagedFiles.filter((f) => existsSync(resolve(cwd, f)));
+  const existingFiles = stagedFiles.filter((f) => existsSync(resolve(repoRoot, f)));
   if (existingFiles.length === 0) {
     console.log(pc.green("[OK] No existing staged files to check."));
     return { blocked: false, findings: [], totalFilesScanned: 0 };
   }
 
-  const scanner = new SecurityScanner(cwd, opts.rulesPath);
+  const scanner = new SecurityScanner(repoRoot, opts.rulesPath);
   const result = await scanner.scanFiles(existingFiles, "ALL");
 
   const blockingFindings = result.findings.filter(

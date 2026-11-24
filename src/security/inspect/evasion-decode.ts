@@ -121,7 +121,7 @@ export function normalizeEvasion(
   opts: { plusIsSpace?: boolean; foldCase?: boolean } = {},
 ): { value: string; bytes: Uint8Array; signals: EvasionSignals } {
   const sig = emptySignals();
-  const srcBytes = Buffer.from(src, "latin1");
+  const srcBytes = Buffer.from(src, "utf8");
   const out = new Uint8Array(srcBytes.length);
   let n = 0;
   let i = 0;
@@ -180,7 +180,7 @@ export function normalizeEvasion(
     }
   }
 
-  const value = Buffer.from(sliced).toString("latin1");
+  const value = Buffer.from(sliced).toString(utf8.invalid ? "latin1" : "utf8");
   return { value, bytes: sliced, signals: sig };
 }
 

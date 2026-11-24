@@ -844,7 +844,7 @@ export class HeadlessBrowserController {
   private pwRouteHooked = false;
   private harEntries: any[] = [];
   private harStartedAt = "";
-  private userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Wide-CLI/0.7.211126";
+  private userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Wide-CLI/0.8.241126";
 
   public findSystemBrowserExecutable(): string | null {
     const candidates: string[] = [];
@@ -904,8 +904,8 @@ export class HeadlessBrowserController {
     try {
       const req = createRequire(import.meta.url);
       const baseDir = path.dirname(req.resolve("./browser.js"));
-      const siblingIde = path.resolve(baseDir, "../../../../wide-ide/node_modules/playwright-core");
-      const siblingWide = path.resolve(baseDir, "../../../../wide/node_modules/playwright-core");
+      const siblingIde = path.resolve(baseDir, "../../../wide-ide/node_modules/playwright-core");
+      const siblingWide = path.resolve(baseDir, "../../../wide/node_modules/playwright-core");
       for (const id of ["playwright-core", siblingIde, siblingWide]) {
         try {
           return req(id);
@@ -1083,18 +1083,23 @@ export class HeadlessBrowserController {
   }
 
   private async cleanupLiveDrivers(): Promise<void> {
-    if (this.pwBrowser) {
+    const pw = this.pwBrowser;
+    this.pwPage = null;
+    this.pwContext = null;
+    this.pwBrowser = null;
+    const cdp = this.cdp;
+    this.cdp = null;
+    if (pw) {
       try {
-        await this.pwBrowser.close();
+        await pw.close();
       } catch {
       }
-      this.pwPage = null;
-      this.pwContext = null;
-      this.pwBrowser = null;
     }
-    if (this.cdp) {
-      await this.cdp.dispose();
-      this.cdp = null;
+    if (cdp) {
+      try {
+        await cdp.dispose();
+      } catch {
+      }
     }
     activeControllers.delete(this);
   }
@@ -1290,21 +1295,27 @@ export class HeadlessBrowserController {
 
     if (mode === "cdp" && this.cdp) {
       try {
+        const prevUrl = await this.cdp.evalValue("location.href").catch(() => "");
         let loaded = false;
         const offLoad = this.cdp.on("Page.loadEventFired", () => {
           loaded = true;
         });
-        await this.cdp.send("Page.navigate", { url: target });
-        const deadline = Date.now() + 15000;
-        while (!loaded && Date.now() < deadline) {
-          const ready = await this.cdp.evalValue("document.readyState").catch(() => "loading");
-          if (ready === "complete" || ready === "interactive") {
-            loaded = true;
-            break;
+        try {
+          await this.cdp.send("Page.navigate", { url: target });
+          const deadline = Date.now() + 15000;
+          while (!loaded && Date.now() < deadline) {
+            const curUrl = await this.cdp.evalValue("location.href").catch(() => "");
+            const ready = await this.cdp.evalValue("document.readyState").catch(() => "loading");
+            const urlChanged = Boolean(curUrl) && curUrl !== "about:blank" && (curUrl !== prevUrl || target === prevUrl);
+            if (urlChanged && (ready === "complete" || ready === "interactive")) {
+              loaded = true;
+              break;
+            }
+            await new Promise((r) => setTimeout(r, 100));
           }
-          await new Promise((r) => setTimeout(r, 100));
+        } finally {
+          offLoad();
         }
-        offLoad();
         await new Promise((r) => setTimeout(r, 150));
         this.state.history.push(target);
         this.state.formInputs = {};
@@ -1902,9 +1913,9 @@ export class HeadlessBrowserController {
     };
   }
 
-  public close(): string {
+  public async close(): Promise<string> {
     const u = this.state.url;
-    void this.cleanupLiveDrivers();
+    await this.cleanupLiveDrivers();
     this.consoleBuffer = [];
     this.cookieJar.clear();
     this.harEntries = [];
@@ -2314,7 +2325,7 @@ export const browserCloseTool: Tool = {
   },
   async execute(): Promise<ToolResult> {
     try {
-      const result = defaultBrowser.close();
+      const result = await defaultBrowser.close();
       return { success: true, output: result };
     } catch (err: any) {
       return { success: false, output: "", error: `Close error: ${err.message}` };

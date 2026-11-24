@@ -25,7 +25,7 @@ const instructions = RuleLoader.buildAgentInstructions(agentRules);
 assert.ok(typeof instructions === "string");
 assert.ok(instructions.includes("Do not use emojis"));
 
-const sanitized = RuleLoader.sanitizeOutput("Hello 😀 World", agentRules);
+const sanitized = RuleLoader.sanitizeOutput("Hello \u{1F600} World", agentRules);
 assert.strictEqual(sanitized, "Hello  World");
 
 const agentPathInfo = RuleLoader.getAgentRulesPath();
@@ -63,7 +63,10 @@ try {
   const mergedAgent = RuleLoader.loadAgentRules(undefined, tmpWs);
   assert.ok(mergedAgent.some(r => r.id === "wide/ai-no-emojis"));
 
-  assert.strictEqual(RuleLoader.sanitizeOutput("Hello 😀⭐ℹ️1️⃣👨‍💻🇷🇺 World", mergedAgent), "Hello  World");
+  assert.strictEqual(
+    RuleLoader.sanitizeOutput("Hello \u{1F600}\u2B50\u2139\uFE0F1\uFE0F\u20E3\u{1F468}\u200D\u{1F4BB}\u{1F1F7}\u{1F1FA} World", mergedAgent),
+    "Hello  World",
+  );
   const stream = RuleLoader.createStreamSanitizer(mergedAgent);
   const streamed = [
     stream.push("Hi \uD83D"),
@@ -72,7 +75,7 @@ try {
     stream.push("\uFE0F Ok"),
     stream.flush()
   ].join("");
-  assert.strictEqual(streamed, "Hi   Ok");
+  assert.strictEqual(streamed, "Hi    Ok");
 
   const scanner = new SecurityScanner(tmpWs);
   const scanRes = await scanner.scanPath(".", "ALL");

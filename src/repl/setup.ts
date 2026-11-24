@@ -1,7 +1,13 @@
 import pc from "picocolors";
 import type { Agent } from "../agent/index.js";
 import { configManager, type ProviderName, type WideConfig } from "../config/index.js";
-import { createProvider, listOllamaModels, PROVIDER_PRESETS } from "../providers/index.js";
+import {
+  checkAntigravityStatus,
+  checkClaudeCodeAuth,
+  createProvider,
+  listOllamaModels,
+  PROVIDER_PRESETS,
+} from "../providers/index.js";
 
 export type PromptQuestionFn = (question: string) => Promise<string>;
 
@@ -20,7 +26,11 @@ const PROVIDER_CHOICES: Array<{ index: string; name: ProviderName; label: string
 
 export async function runInteractiveSetup(ask: PromptQuestionFn, agent: Agent, isFirstLaunch = false): Promise<boolean> {
   const cfg = configManager.get();
-  const ollama = await listOllamaModels(cfg.ollamaBaseUrl);
+  const [ollama, claudeAuth, agyStatus] = await Promise.all([
+    listOllamaModels(cfg.ollamaBaseUrl),
+    checkClaudeCodeAuth(),
+    checkAntigravityStatus(),
+  ]);
 
   console.log("");
   if (isFirstLaunch) {
@@ -37,9 +47,17 @@ export async function runInteractiveSetup(ask: PromptQuestionFn, agent: Agent, i
         ? pc.green(` (running, ${ollama.models.length} model(s))`)
         : pc.dim(" (not detected on localhost:11434)");
     } else if (item.name === "claude-code") {
-      note = pc.dim(" (uses local claude CLI login)");
+      note = claudeAuth?.loggedIn
+        ? pc.green(` (signed in${claudeAuth.subscriptionType ? `, ${claudeAuth.subscriptionType}` : ""})`)
+        : claudeAuth
+          ? pc.yellow(" (installed, run 'claude auth login')")
+          : pc.dim(" (uses local claude CLI login)");
     } else if (item.name === "antigravity") {
-      note = pc.dim(" (uses local agy CLI login)");
+      note = agyStatus.signedIn
+        ? pc.green(` (v${agyStatus.version || "cli"}, signed in, ${agyStatus.models.length} model(s))`)
+        : agyStatus.installed
+          ? pc.yellow(` (v${agyStatus.version || "cli"}, run 'agy' to sign in)`)
+          : pc.dim(" (uses local agy CLI login)");
     } else if (item.name === "codex") {
       note = pc.dim(" (uses local codex ChatGPT login)");
     } else if (configManager.getApiKey(item.name as ApiKeyProvider)) {
@@ -49,7 +67,7 @@ export async function runInteractiveSetup(ask: PromptQuestionFn, agent: Agent, i
   }
   console.log(`  ${pc.cyan("0")}. ${pc.dim("Skip for now (use /scan, /rules, /help, !shell)")}\n`);
 
-  const selection = (await ask(`  ${pc.cyan("Provider [1-6, Enter to skip]:")} `)).trim();
+  const selection = (await ask(`  ${pc.cyan("Provider [1-8, Enter to skip]:")} `)).trim();
   if (!selection || selection === "0" || selection.toLowerCase() === "skip") {
     console.log(pc.dim("  Skipped setup. Run /setup or /key <provider> <key> anytime.\n"));
     return false;
@@ -81,6 +99,8 @@ export async function runInteractiveSetup(ask: PromptQuestionFn, agent: Agent, i
   let availableModels = PROVIDER_PRESETS[chosen.name];
   if (chosen.name === "ollama" && ollama.models.length > 0) {
     availableModels = ollama.models;
+  } else if (chosen.name === "antigravity" && agyStatus.models.length > 0) {
+    availableModels = ["default", ...agyStatus.models];
   }
 
   const defaultModel = availableModels[0];

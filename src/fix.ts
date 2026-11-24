@@ -163,7 +163,7 @@ export async function runInteractiveFix(opts: FixOptions = {}): Promise<FixSumma
       }
 
       if (!replacementBlock) {
-        replacementBlock = createQuickFixSuppression(finding, originalLine);
+        replacementBlock = createQuickFixSuppression(finding, originalBlock);
         patchSource = "quick-fix suppression";
       }
 

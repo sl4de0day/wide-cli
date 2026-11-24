@@ -255,7 +255,7 @@ export const editFileTool: Tool = {
         };
       }
 
-      const newContent = content.replace(params.target, params.replacement);
+      const newContent = content.replace(params.target, () => params.replacement);
       const diff = formatColoredDiffPreview(relPath, content, newContent, { maxLines: 80 });
       const allowed = await confirmWriteAction("edit_file", relPath, diff, context);
       if (!allowed) {

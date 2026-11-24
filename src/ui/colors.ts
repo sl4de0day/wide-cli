@@ -3,8 +3,8 @@ import pc from "picocolors";
 export const colors = {
   primary: pc.cyan,
   primaryBold: (t: string) => pc.bold(pc.cyan(t)),
-  accent: pc.magenta,
-  accentBold: (t: string) => pc.bold(pc.magenta(t)),
+  accent: pc.cyan,
+  accentBold: (t: string) => pc.bold(pc.cyan(t)),
   success: pc.green,
   successBold: (t: string) => pc.bold(pc.green(t)),
   warning: pc.yellow,

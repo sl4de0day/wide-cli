@@ -168,7 +168,7 @@ export class SecurityScanner {
           tool: {
             driver: {
               name: "Wide Security Scanner",
-              version: "0.7.211126",
+              version: "0.8.241126",
               rules: [...rulesMap.values()]
             }
           },
@@ -277,7 +277,7 @@ export class SecurityScanner {
         rulesByLangKey.set(langKey, applicableRules);
       }
 
-      const lines = content.split("\n");
+      const lines = content.split(/\r?\n/);
       const fileHead = lines.slice(0, Math.min(lines.length, 15)).join("\n");
       const spans = buildLogicalSpans(lines);
       const seenLineRule = new Set<string>();
