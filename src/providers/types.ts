@@ -14,9 +14,23 @@ export interface ChatMessage {
   name?: string;
 }
 
+export interface ProviderEvent {
+  type: "thinking" | "tool_start" | "tool_end" | "status" | "usage";
+  label?: string;
+  detail?: string;
+  success?: boolean;
+  elapsedMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
 export interface ProviderResponse {
   content: string;
   toolCalls?: ToolCall[];
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+  };
 }
 
 export interface LLMProvider {
@@ -26,6 +40,7 @@ export interface LLMProvider {
     messages: ChatMessage[],
     tools: ToolDefinition[],
     onChunk: (chunk: string) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onEvent?: (event: ProviderEvent) => void
   ): Promise<ProviderResponse>;
 }

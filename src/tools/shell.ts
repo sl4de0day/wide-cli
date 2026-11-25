@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
-import pc from "picocolors";
+import { theme } from "../ui/theme.js";
 import { assessShellRisk } from "./risk.js";
-import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
+import { normalizeApprovalOutcome, type Tool, type ToolExecutionContext, type ToolResult } from "./types.js";
 
 const INTERACTIVE_PROMPT_TAIL = /(confirm|continue|proceed|overwrite|password|passphrase|enter\s+.*:|\[[yn]\/[yn]\]|\(yes\/no\)|:\s*$|\?\s*$)/i;
 
@@ -27,7 +27,12 @@ function terminateProcessTree(pid: number | undefined): void {
 export async function runShellProcess(
   command: string,
   workingDirectory: string,
-  options: { timeoutMs?: number; signal?: AbortSignal; streamToStdout?: boolean } = {}
+  options: {
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    streamToStdout?: boolean;
+    onOutputLine?: (line: string, stream: "stdout" | "stderr") => void;
+  } = {}
 ): Promise<ToolResult & { exitCode: number }> {
   const timeoutMs = Math.max(500, options.timeoutMs || 30000);
   if (options.signal?.aborted) {
@@ -118,10 +123,25 @@ export async function runShellProcess(
     };
     options.signal?.addEventListener("abort", onAbort, { once: true });
 
+    let stdoutLineBuf = "";
+    let stderrLineBuf = "";
+    const emitLines = (chunk: string, kind: "stdout" | "stderr") => {
+      if (!options.onOutputLine) return;
+      const combined = (kind === "stdout" ? stdoutLineBuf : stderrLineBuf) + chunk;
+      const parts = combined.split(/\r?\n/);
+      const rest = parts.pop() ?? "";
+      if (kind === "stdout") stdoutLineBuf = rest;
+      else stderrLineBuf = rest;
+      for (const line of parts) {
+        if (line.trim()) options.onOutputLine(line, kind);
+      }
+    };
+
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       if (stdout.length < 32768) stdout += text;
       if (options.streamToStdout) process.stdout.write(text);
+      emitLines(text, "stdout");
       resetIdleCheck();
     });
 
@@ -129,6 +149,7 @@ export async function runShellProcess(
       const text = chunk.toString("utf8");
       if (stderr.length < 16384) stderr += text;
       if (options.streamToStdout) process.stderr.write(text);
+      emitLines(text, "stderr");
       resetIdleCheck();
     });
 
@@ -162,9 +183,33 @@ export const runCommandTool: Tool = {
       return { success: false, output: "", error: "run_command requires a non-empty command." };
     }
 
+    if (context.permissionProfile === "plan") {
+      return {
+        success: false,
+        output: "",
+        error: "Blocked in Plan mode (read-only). Switch mode with Shift+Tab to execute shell commands.",
+      };
+    }
+
     const risk = assessShellRisk(cmd);
-    const sessionAutoAllowed = !risk.destructive && context.sessionApprovedTools?.has("run_command");
-    const needsApproval = risk.destructive ? true : (!context.autoApproveRun && !sessionAutoAllowed);
+    const ruleDecision = context.evaluatePermission?.("command", cmd) ?? null;
+    if (ruleDecision === "deny") {
+      return {
+        success: false,
+        output: "",
+        error: `Command blocked by permission deny rule: ${cmd}`,
+      };
+    }
+    const sessionAutoAllowed = !risk.destructive && (
+      context.sessionApprovedTools?.has("run_command") ||
+      ruleDecision === "allow" ||
+      context.permissionProfile === "auto"
+    );
+    const needsApproval = risk.destructive
+      ? true
+      : ruleDecision === "ask"
+        ? true
+        : !context.autoApproveRun && !sessionAutoAllowed;
 
     if (needsApproval) {
       if (!context.requestApproval) {
@@ -176,18 +221,22 @@ export const runCommandTool: Tool = {
             : "Command rejected: run_command requires approval (run interactively or pass --yes)."
         };
       }
-      const decision = await context.requestApproval({
+      const firstToken = cmd.split(/\s+/)[0] || cmd;
+      const rawOutcome = await context.requestApproval({
         tool: "run_command",
         title: risk.destructive ? `Destructive command blocked for confirmation (${risk.reason})` : "Allow shell command execution?",
         detail: cmd,
-        preview: `${pc.dim("$")} ${pc.bold(cmd)}`,
+        preview: `${theme.faint("$")} ${theme.fgBold(cmd)}`,
         destructive: risk.destructive,
         sessionKey: risk.destructive ? undefined : "run_command",
+        suggestedPattern: risk.destructive ? undefined : `command(${firstToken})`,
       });
-      if (decision === "deny") {
-        return { success: false, output: "", error: "Command execution declined by user." };
+      const outcome = normalizeApprovalOutcome(rawOutcome);
+      if (outcome.decision === "deny") {
+        const fb = outcome.feedback ? ` User guidance: ${outcome.feedback}` : "";
+        return { success: false, output: "", error: `Command execution declined by user.${fb}` };
       }
-      if (decision === "always" && !risk.destructive) {
+      if (outcome.decision === "always" && !risk.destructive) {
         context.sessionApprovedTools?.add("run_command");
       }
     }
@@ -195,6 +244,7 @@ export const runCommandTool: Tool = {
     return runShellProcess(cmd, context.workingDirectory, {
       timeoutMs: params.timeoutMs || 30000,
       signal: context.signal,
+      onOutputLine: context.onOutputLine,
     });
   }
 };

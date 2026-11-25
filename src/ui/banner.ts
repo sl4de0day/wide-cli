@@ -2,7 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
-import pc from "picocolors";
+import { horizontalRule, termHeight, termWidth, truncateAnsi } from "./ansi.js";
+import { detectColorDepth as detectThemeColorDepth, glyphs, theme } from "./theme.js";
 
 export type ColorMode = "truecolor" | "ansi256" | "none";
 
@@ -225,40 +226,11 @@ function loadLogoImage(explicitPath?: string): RgbaImage {
 
 export function detectColorDepth(explicit?: ColorMode): ColorMode {
   if (explicit) return explicit;
-  if (
-    process.env.NO_COLOR !== undefined ||
-    process.env.NODE_DISABLE_COLORS !== undefined ||
-    process.argv.includes("--no-color")
-  ) {
-    return "none";
-  }
-  const forceColor = process.env.FORCE_COLOR;
-  if (forceColor === "0") return "none";
-  if (!process.stdout.isTTY && !forceColor) {
-    return "truecolor";
-  }
-  const colorTerm = (process.env.COLORTERM || "").toLowerCase();
-  const termProgram = process.env.TERM_PROGRAM || "";
-  const term = (process.env.TERM || "").toLowerCase();
-  if (
-    colorTerm === "truecolor" ||
-    colorTerm === "24bit" ||
-    Boolean(process.env.WT_SESSION) ||
-    (process.platform === "win32" && termProgram !== "Apple_Terminal") ||
-    term.includes("24bit") ||
-    term.includes("truecolor") ||
-    term.includes("kitty") ||
-    term.includes("alacritty") ||
-    term.includes("wezterm") ||
-    termProgram === "vscode" ||
-    termProgram === "iTerm.app" ||
-    termProgram === "WezTerm" ||
-    termProgram === "Ghostty" ||
-    termProgram === "Hyper"
-  ) {
-    return "truecolor";
-  }
-  return "ansi256";
+  const resolved = detectThemeColorDepth();
+  if (resolved === "truecolor") return "truecolor";
+  if (resolved === "ansi256") return "ansi256";
+  if (resolved === "ansi16") return "ansi256";
+  return "none";
 }
 
 function rgbToAnsi256(r: number, g: number, b: number): number {
@@ -372,19 +344,14 @@ export function renderLogoLines(options: LogoRenderOptions = {}): string[] {
   return lines;
 }
 
-export function formatBannerLines(version = "0.8.241126", options: LogoRenderOptions = {}): string[] {
+export function formatBannerLines(version = "0.9.251126", options: LogoRenderOptions = {}): string[] {
   const logoLines = renderLogoLines(options);
-  const nordAccent = (text: string) => {
-    const mode = detectColorDepth(options.colorMode);
-    if (mode === "truecolor") return `\x1b[38;2;94;129;172m${text}\x1b[0m`;
-    if (mode === "ansi256") return `\x1b[38;5;67m${text}\x1b[0m`;
-    return text;
-  };
-  const titleLine = `${pc.bold(pc.white("Wide"))} ${pc.dim(`v${version}`)}`;
-  const subtitleLine = pc.gray("Security-First Autonomous AI Agent");
-  const hintLine = `${pc.dim("Type")} ${nordAccent("/help")} ${pc.dim("for commands or")} ${nordAccent("exit")} ${pc.dim("to quit.")}`;
+  const depth = detectColorDepth(options.colorMode);
+  const titleLine = `${theme.fgBold("Wide", depth)} ${theme.faint(`v${version}`, depth)}`;
+  const subtitleLine = theme.muted("Security-First Autonomous AI Agent", depth);
+  const hintLine = `${theme.faint("Type", depth)} ${theme.accent("/help", depth)} ${theme.faint("for commands", depth)} ${theme.faint(glyphs.middot, depth)} ${theme.accent("@file", depth)} ${theme.faint("context", depth)} ${theme.faint(glyphs.middot, depth)} ${theme.accent("Shift+Tab", depth)} ${theme.faint("mode", depth)}`;
 
-  const columns = process.stdout.columns || 80;
+  const columns = termWidth(80);
   const sideBySide = columns >= 68 && logoLines.length >= 5;
 
   if (!sideBySide) {
@@ -409,7 +376,72 @@ export function formatBannerLines(version = "0.8.241126", options: LogoRenderOpt
   });
 }
 
-export function printBanner(version = "0.8.241126") {
+export interface WelcomeHeaderOptions {
+  version?: string;
+  providerLabel: string;
+  providerReady: boolean;
+  toolMode: string;
+  permissionProfile: string;
+  allowBrowser: boolean;
+  workspace: string;
+  gitBranch?: string;
+  gitDirty?: boolean;
+  ruleCount?: number;
+  advisoryCount?: number;
+}
+
+export function printWelcomeHeader(opts: WelcomeHeaderOptions): void {
+  const version = opts.version || "0.9.251126";
+  const cols = termWidth(80);
+  const rows = termHeight(24);
+  const compact = cols < 68 || rows < 20;
+
+  const modelPart = opts.providerReady
+    ? theme.info(opts.providerLabel)
+    : `${theme.warn("unconfigured")} ${theme.faint("(/setup)")}`;
+  const gitPart = opts.gitBranch
+    ? ` ${theme.faint(glyphs.middot)} ${theme.accent(`git:${opts.gitBranch}${opts.gitDirty ? "*" : ""}`)}`
+    : "";
+  const rulesPart =
+    typeof opts.ruleCount === "number" && opts.ruleCount > 0
+      ? ` ${theme.faint(glyphs.middot)} ${theme.muted(`${opts.ruleCount} rules`)}${opts.advisoryCount ? theme.faint(` / ${opts.advisoryCount} OSV`) : ""}`
+      : "";
+
+  console.log("");
+  if (compact) {
+    console.log(
+      `  ${theme.fgBold("Wide")} ${theme.faint(`v${version}`)} ${theme.faint(glyphs.middot)} ${modelPart} ${theme.faint(glyphs.middot)} ${theme.accent(opts.toolMode)}${gitPart}`,
+    );
+    console.log(`  ${theme.faint(truncateAnsi(opts.workspace, Math.max(24, cols - 4)))}`);
+    console.log(`  ${horizontalRule(Math.min(cols - 4, 88))}`);
+    console.log("");
+    return;
+  }
+
+  const logoLines = renderLogoLines();
+  const titleLine = `${theme.fgBold("Wide")} ${theme.faint(`v${version}`)}  ${theme.badge(opts.toolMode.toUpperCase(), "accent")} ${theme.badge(opts.permissionProfile.toUpperCase(), opts.permissionProfile === "plan" ? "info" : opts.permissionProfile === "auto" ? "high" : "muted")}`;
+  const modelLine = `${theme.faint("Model")}     ${modelPart}${gitPart}`;
+  const scopeLine = `${theme.faint("Workspace")} ${theme.muted(truncateAnsi(opts.workspace, Math.max(24, cols - 32)))}`;
+  const statsLine = `${theme.faint("Security")}  ${theme.muted(`Browser ${opts.allowBrowser ? "ON" : "OFF"}`)}${rulesPart}`;
+  const tipsLine = `${theme.accent("/")} ${theme.faint("commands")}  ${theme.accent("@")} ${theme.faint("files")}  ${theme.accent("!")} ${theme.faint("shell")}  ${theme.accent("Shift+Tab")} ${theme.faint("permissions")}  ${theme.accent("Esc")} ${theme.faint("interrupt")}`;
+
+  const infoMap = new Map<number, string>([
+    [0, titleLine],
+    [1, modelLine],
+    [2, scopeLine],
+    [3, statsLine],
+    [5, tipsLine],
+  ]);
+
+  for (let i = 0; i < logoLines.length; i++) {
+    const info = infoMap.get(i);
+    const line = info ? `  ${logoLines[i]}   ${info}` : `  ${logoLines[i]}`;
+    console.log(truncateAnsi(line, Math.max(30, cols - 1)));
+  }
+  console.log("");
+}
+
+export function printBanner(version = "0.9.251126") {
   console.log("");
   for (const line of formatBannerLines(version)) {
     console.log(line);

@@ -1,6 +1,13 @@
+import { execFileSync } from "node:child_process";
 import { Command } from "commander";
-import pc from "picocolors";
 import { debugLog, enableDebugLogging } from "./config/logger.js";
+import { formatErrorCard } from "./ui/errors.js";
+import { formatCrawlReport, formatInspectReport } from "./ui/reports.js";
+import { restoreTerminalCursor, Spinner } from "./ui/spinner.js";
+import { glyphs, setColorDepthOverride, theme } from "./ui/theme.js";
+import { disableTerminalInputModes, setMouseEnabled } from "./ui/tui/keys.js";
+
+const CLI_VERSION = "0.9.251126";
 
 async function readPipedStdin(requireFullRead: boolean): Promise<string> {
   if (process.stdin.isTTY) {
@@ -56,12 +63,33 @@ async function readPipedStdin(requireFullRead: boolean): Promise<string> {
   });
 }
 
+function listGitChangedFiles(cwd: string): string[] {
+  try {
+    const out = execFileSync("git", ["status", "--porcelain"], {
+      cwd,
+      encoding: "utf8",
+      timeout: 3000,
+      windowsHide: true,
+    });
+    const files: string[] = [];
+    for (const raw of out.split(/\r?\n/)) {
+      if (!raw.trim() || raw.startsWith(" D") || raw.startsWith("D ")) continue;
+      const p = raw.slice(3).trim().replace(/^"|"$/g, "");
+      const finalPath = p.includes(" -> ") ? p.split(" -> ").pop()!.trim() : p;
+      if (finalPath) files.push(finalPath);
+    }
+    return [...new Set(files)];
+  } catch {
+    return [];
+  }
+}
+
 let cursorHookRegistered = false;
-async function ensureCursorCleanupHook(): Promise<void> {
+function ensureTerminalCleanupHook(): void {
   if (cursorHookRegistered) return;
   cursorHookRegistered = true;
-  const { restoreTerminalCursor } = await import("./ui/spinner.js");
   process.on("exit", () => {
+    disableTerminalInputModes();
     restoreTerminalCursor();
   });
 }
@@ -70,28 +98,59 @@ const program = new Command();
 
 program
   .name("wide")
-  .description("Wide's AI coding and web security agents in your terminal")
-  .version("0.8.241126")
+  .description("Wide — Security-first autonomous AI coding and AppSec agent in your terminal")
+  .version(CLI_VERSION)
   .option("-d, --debug", "Enable structured debug diagnostics to stderr")
-  .option("-v, --verbose", "Enable verbose diagnostic logging")
+  .option("-v, --verbose", "Show expanded tool outputs and verbose diagnostics")
+  .option("-q, --quiet", "Suppress non-essential banners and status lines")
+  .option("--no-color", "Disable ANSI color formatting")
+  .option("--no-mouse", "Disable terminal mouse click and wheel interaction")
   .argument("[prompt...]", "Optional initial prompt for the agent")
   .option("-p, --print", "Run a single prompt non-interactively and exit")
+  .option("--output-format <format>", "Output format for --print mode (text, json, stream-json)", "text")
   .option("-c, --continue", "Resume the most recent saved interactive session")
   .option("-r, --resume [sessionId]", "Resume a saved interactive session by ID")
-  .option("--provider <provider>", "LLM provider to use (gemini, ollama, claude, claude-code, antigravity, codex, deepseek, openai)")
+  .option("--provider <provider>", "LLM provider (antigravity, claude-code, gemini, claude, ollama, codex, deepseek, openai)")
   .option("-m, --model <model>", "Model name to use")
-  .option("--mode <mode>", "Tool mode to use (full, code, security)")
+  .option("--mode <mode>", "Tool mode (full, code, security)")
+  .option("--plan", "Start in read-only Plan mode (no disk writes or shell execution)")
   .option("--no-browser", "Disable interactive browser_* tools")
   .option("-y, --yes", "Auto-approve all file edits and non-destructive command executions")
+  .addHelpText(
+    "after",
+    [
+      "",
+      "Command Groups:",
+      "  Interactive Agent:    wide [prompt]  |  wide -c  |  wide --plan  |  wide -p --output-format json",
+      "  Security Analysis:    scan  |  crawl  |  inspect  |  fuzz  |  payloads",
+      "  Remediation & Hooks:  fix  |  hook install|uninstall|run",
+      "  Setup & Diagnostics:  doctor  |  config  |  rules  |  update  |  completion",
+      "",
+      "Examples:",
+      "  $ wide                                      Launch interactive TUI session",
+      "  $ wide --plan \"design auth refactor\"         Start in read-only Plan mode",
+      "  $ git diff | wide -p \"review for security\"   Pipe stdin into non-interactive agent",
+      "  $ wide scan . --fail-on HIGH --changed      CI gate over git-modified files",
+      "  $ wide fix . --ai                           Interactive security patch review",
+      "  $ wide doctor                               Verify providers, rules, and terminal setup",
+      "",
+    ].join("\n"),
+  )
   .hook("preAction", () => {
     const rootOpts = program.opts();
+    if (rootOpts.color === false || process.argv.includes("--no-color")) {
+      setColorDepthOverride("none");
+    }
+    if (rootOpts.mouse === false || process.argv.includes("--no-mouse")) {
+      setMouseEnabled(false);
+    }
     if (rootOpts.debug || rootOpts.verbose) {
       enableDebugLogging();
       debugLog("cli", `invoked argv=${JSON.stringify(process.argv.slice(2))}`);
     }
   })
   .action(async (promptParts, options) => {
-    await ensureCursorCleanupHook();
+    ensureTerminalCleanupHook();
     const pipedData = await readPipedStdin(Boolean(options.print));
     const argPrompt = Array.isArray(promptParts) ? promptParts.join(" ").trim() : "";
     let userPrompt = argPrompt;
@@ -100,16 +159,23 @@ program
       userPrompt = userPrompt ? `${userPrompt}\n\n[Piped Input]:\n${pipedData}` : pipedData;
     }
 
+    const outputFormat = String(options.outputFormat || "text").trim().toLowerCase();
+    if (outputFormat !== "text" && outputFormat !== "json" && outputFormat !== "stream-json") {
+      console.error(formatErrorCard(new Error(`Invalid --output-format '${options.outputFormat}'. Choose text, json, or stream-json.`)));
+      process.exit(1);
+    }
+
+    const nonInteractive = Boolean(options.print || pipedData);
     const { loadWorkspaceConfig } = await import("./config/workspace.js");
     const ws = loadWorkspaceConfig();
-    if (ws.rules.length > 0) {
-      console.log(pc.dim(`Loaded ${ws.rules.length} workspace rule(s) from .wide/rules`));
+    if (ws.rules.length > 0 && !options.quiet && !nonInteractive) {
+      console.error(theme.faint(`  Loaded ${ws.rules.length} workspace rule(s) from .wide/rules`));
     }
 
     if (options.mode !== undefined) {
       const normalizedMode = String(options.mode).trim().toLowerCase();
       if (normalizedMode !== "full" && normalizedMode !== "code" && normalizedMode !== "security") {
-        console.error(pc.red(`Error: Invalid --mode '${options.mode}'. Choose one of: full, code, security.`));
+        console.error(formatErrorCard(new Error(`Invalid --mode '${options.mode}'. Choose one of: full, code, security.`)));
         process.exit(1);
       }
       options.mode = normalizedMode;
@@ -117,11 +183,11 @@ program
 
     const cliToolMode = options.mode as "full" | "code" | "security" | undefined;
     const cliAllowBrowser = options.browser === false ? false : undefined;
+    const cliPermProfile = options.plan ? "plan" : options.yes ? "auto" : undefined;
 
-    const nonInteractive = Boolean(options.print || pipedData);
     if (nonInteractive) {
       if (!userPrompt) {
-        console.error(pc.red("Error: --print requires a prompt or piped input."));
+        console.error(formatErrorCard(new Error("--print requires a prompt or piped input.")));
         process.exit(1);
       }
       try {
@@ -135,6 +201,8 @@ program
         const agent = new Agent(process.cwd(), provider, {
           toolMode: cliToolMode,
           allowBrowser: cliAllowBrowser,
+          permissionProfile: cliPermProfile,
+          verbose: Boolean(options.verbose),
         });
         if (options.continue) {
           const latest = loadLatestSession();
@@ -143,15 +211,48 @@ program
           const saved = loadSession(options.resume);
           if (saved) agent.loadMessages(saved.messages);
         }
-        await agent.runPrompt(userPrompt, {
+
+        const isJson = outputFormat === "json";
+        const isStreamJson = outputFormat === "stream-json";
+        const finalAnswer = await agent.runPrompt(userPrompt, {
           autoApproveWrite: options.yes ? true : undefined,
           autoApproveRun: options.yes ? true : undefined,
+          permissionProfile: cliPermProfile,
+          rawOutput: outputFormat === "text" && !process.stdout.isTTY,
+          silent: isJson || isStreamJson,
+          statusStream: process.stderr,
+          onStreamEvent: isStreamJson
+            ? (ev) => {
+                process.stdout.write(`${JSON.stringify(ev)}\n`);
+              }
+            : undefined,
         });
+
+        if (isJson) {
+          process.stdout.write(
+            `${JSON.stringify(
+              {
+                ok: true,
+                provider: provider.name,
+                model: provider.model,
+                response: finalAnswer,
+                stats: agent.getStats(),
+              },
+              null,
+              2,
+            )}\n`,
+          );
+        }
+
         if (agent.getAllowBrowser()) {
           await executeTool("browser_close", {}, { workingDirectory: process.cwd() });
         }
       } catch (err: any) {
-        console.error(`${pc.red("Error:")} ${err.message}`);
+        if (outputFormat === "json" || outputFormat === "stream-json") {
+          process.stdout.write(`${JSON.stringify({ ok: false, error: err.message })}\n`);
+        } else {
+          console.error(formatErrorCard(err));
+        }
         process.exit(1);
       }
       return;
@@ -167,7 +268,23 @@ program
       autoApproveAll: Boolean(options.yes),
       toolMode: cliToolMode,
       allowBrowser: cliAllowBrowser,
+      permissionProfile: cliPermProfile,
+      verbose: Boolean(options.verbose),
     });
+  });
+
+program
+  .command("doctor")
+  .description("Check terminal capabilities, provider auth, Git status, and security rules health")
+  .option("--json", "Output diagnostic checks as JSON")
+  .action(async (opts) => {
+    const { runDoctorDiagnostics, formatDoctorReport } = await import("./repl/doctor.js");
+    const items = await runDoctorDiagnostics(process.cwd(), CLI_VERSION);
+    if (opts.json) {
+      console.log(JSON.stringify({ version: CLI_VERSION, checks: items }, null, 2));
+      return;
+    }
+    console.log(formatDoctorReport(items));
   });
 
 program
@@ -178,26 +295,71 @@ program
   .option("--no-sca", "Disable OSV dependency vulnerability scanning")
   .option("--history", "Scan recent git commits for historically leaked secrets")
   .option("--sarif <file>", "Write findings in SARIF 2.1.0 JSON format")
+  .option("-f, --format <fmt>", "Output format (table, compact, json, sarif)", "table")
+  .option("--fail-on <severity>", "Exit with code 1 if any finding meets or exceeds severity (CRITICAL, HIGH, MEDIUM, LOW)")
+  .option("--changed", "Scan only git-modified and untracked workspace files")
   .action(async (targetPath = ".", opts) => {
-    const { executeTool } = await import("./tools/index.js");
-    const res = await executeTool(
-      "run_security_scan",
-      {
-        path: targetPath,
-        severityFilter: opts.severity,
-        rulesPath: opts.rules,
-        sca: opts.sca,
-        scanHistory: Boolean(opts.history),
-        sarifPath: opts.sarif
-      },
-      { workingDirectory: process.cwd() }
-    );
-    if (!res.success && res.error) {
-      console.error(pc.red(res.error));
+    const fmt = String(opts.format || "table").trim().toLowerCase();
+    if (!["table", "compact", "json", "sarif"].includes(fmt)) {
+      console.error(formatErrorCard(new Error(`Invalid --format '${opts.format}'. Choose table, compact, json, or sarif.`)));
       process.exitCode = 1;
       return;
     }
-    console.log(res.output);
+
+    const spinner =
+      fmt === "table" && process.stderr.isTTY
+        ? new Spinner(`Scanning ${opts.changed ? "git-changed files" : targetPath}...`, { stream: process.stderr }).start()
+        : null;
+
+    const t0 = Date.now();
+    try {
+      const { SecurityScanner, meetsSeverityThreshold } = await import("./security/scanner.js");
+      const scanner = new SecurityScanner(process.cwd(), opts.rules);
+      const sev = String(opts.severity || "ALL").toUpperCase() as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "ALL";
+      const scanOpts = {
+        sca: opts.sca !== false,
+        scanHistory: Boolean(opts.history),
+        sarifPath: opts.sarif,
+      };
+
+      let result;
+      if (opts.changed) {
+        const changedFiles = listGitChangedFiles(process.cwd());
+        if (changedFiles.length === 0) {
+          spinner?.stop(true);
+          if (fmt === "json") {
+            console.log(JSON.stringify({ totalFilesScanned: 0, findings: [], summary: { critical: 0, high: 0, medium: 0, low: 0 } }, null, 2));
+          } else {
+            console.log(`  ${theme.ok(glyphs.dot)} No git-modified files to scan.`);
+          }
+          return;
+        }
+        result = await scanner.scanFiles(changedFiles, sev, scanOpts);
+      } else {
+        result = await scanner.scanPath(targetPath, sev, scanOpts);
+      }
+
+      spinner?.stop(true);
+      const elapsedMs = Date.now() - t0;
+
+      if (fmt === "json") {
+        console.log(JSON.stringify({ ...result, elapsedMs }, null, 2));
+      } else if (fmt === "sarif") {
+        console.log(JSON.stringify(scanner.formatSarif(result), null, 2));
+      } else if (fmt === "compact") {
+        console.log(scanner.formatCompactReport(result));
+      } else {
+        console.log(scanner.formatCliReport(result, { elapsedMs }));
+      }
+
+      if (opts.failOn && meetsSeverityThreshold(result.findings, opts.failOn)) {
+        process.exitCode = 1;
+      }
+    } catch (err: any) {
+      spinner?.stop(true);
+      console.error(formatErrorCard(err));
+      process.exitCode = 1;
+    }
   });
 
 program
@@ -209,7 +371,7 @@ program
   .option("--dry-run", "Preview proposed diffs without writing modifications to disk")
   .option("--suppress", "Only generate quick-fix suppressions (wide-ignore directives)")
   .option("--ai", "Use AI LLM provider to synthesize intelligent code remediation patches")
-  .option("--provider <provider>", "LLM provider override (gemini, ollama, claude, claude-code, antigravity, codex, deepseek, openai)")
+  .option("--provider <provider>", "LLM provider override")
   .option("-m, --model <model>", "Model name override")
   .action(async (targetPath = ".", opts) => {
     try {
@@ -227,7 +389,7 @@ program
         cwd: process.cwd()
       });
     } catch (err: any) {
-      console.error(pc.red(`Fix failed: ${err.message}`));
+      console.error(formatErrorCard(err));
       process.exit(1);
     }
   });
@@ -237,30 +399,32 @@ program
   .alias("upgrade")
   .description("Check for updates and synchronize the Wide CLI and rules to the latest version")
   .action(async () => {
+    const spinner = new Spinner("Synchronizing Wide security rules...", { stream: process.stderr }).start();
     try {
       const { RuleLoader } = await import("./security/loader.js");
-      console.log(pc.cyan("Synchronizing Wide security rules..."));
       const ruleResult = await RuleLoader.updateRules();
-      console.log(pc.green(`Synchronized ${ruleResult.count} security rules to ${ruleResult.path}`));
+      spinner.stop(true);
+      console.log(`  ${theme.ok(glyphs.dot)} Synchronized ${theme.fgBold(String(ruleResult.count))} security rules to ${theme.faint(ruleResult.path)}`);
 
-      console.log(pc.cyan("Checking for Wide CLI updates..."));
-      const currentVersion = "0.8.241126";
+      const checkSpinner = new Spinner("Checking for Wide CLI updates...", { stream: process.stderr }).start();
       const res = await fetch("https://api.github.com/repos/sl4de0day/wide-cli/releases/latest", {
         headers: { "User-Agent": "Wide-CLI", Accept: "application/vnd.github+json" },
         signal: AbortSignal.timeout(10000)
       });
+      checkSpinner.stop(true);
       if (res.ok) {
         const release = (await res.json()) as any;
         const latestTag = String(release.tag_name || release.name || "").replace(/^v/i, "");
-        if (latestTag && latestTag !== currentVersion) {
-          console.log(pc.yellow(`New Wide CLI version available: v${latestTag} (current: v${currentVersion})`));
-          console.log(pc.cyan("Run npm install -g wide-cli or download from https://github.com/sl4de0day/wide-cli/releases to update."));
+        if (latestTag && latestTag !== CLI_VERSION) {
+          console.log(`  ${theme.warn(glyphs.warn)} New Wide CLI version available: ${theme.fgBold(`v${latestTag}`)} ${theme.faint(`(current: v${CLI_VERSION})`)}`);
+          console.log(`  ${theme.info("Next:")} Run ${theme.info("npm install -g wide-cli")} to update.`);
         } else {
-          console.log(pc.green(`Wide CLI is already up to date (v${currentVersion}).`));
+          console.log(`  ${theme.ok(glyphs.dot)} Wide CLI is up to date (${theme.info(`v${CLI_VERSION}`)}).`);
         }
       }
     } catch (err: any) {
-      console.error(pc.red(`Update check failed: ${err.message}`));
+      spinner.stop(true);
+      console.error(formatErrorCard(err));
     }
   });
 
@@ -272,13 +436,15 @@ rulesCmd
   .command("update")
   .description("Download latest security rules from wide-rules database")
   .action(async () => {
+    const spinner = new Spinner("Downloading latest rules from wide-rules...", { stream: process.stderr }).start();
     try {
       const { RuleLoader } = await import("./security/loader.js");
-      console.log(pc.cyan("Downloading latest rules from wide-rules repository..."));
       const result = await RuleLoader.updateRules();
-      console.log(pc.green(`Successfully synchronized ${result.count} rules to ${result.path}`));
+      spinner.stop(true);
+      console.log(`  ${theme.ok(glyphs.dot)} Synchronized ${result.count} rules and ${result.osvCount} OSV advisories to ${theme.faint(result.path)}`);
     } catch (err: any) {
-      console.error(pc.red(`Failed to update rules: ${err.message}`));
+      spinner.stop(true);
+      console.error(formatErrorCard(err));
       process.exit(1);
     }
   });
@@ -299,10 +465,11 @@ rulesCmd
     const { RuleLoader } = await import("./security/loader.js");
     const rules = RuleLoader.loadAgentRules(opts.rules);
     const info = RuleLoader.getAgentRulesPath();
-    console.log(pc.bold(`Active AI Agent Security Rules (${rules.length}) [source: ${info.active}]:`));
+    console.log(`\n  ${theme.fgBold(`Active AI Agent Security Rules (${rules.length})`)} ${theme.faint(`[source: ${info.active}]`)}\n`);
     for (const r of rules) {
-      console.log(`  ${pc.cyan(r.id)} [${pc.yellow(r.severity)}] (${r.cwe}) - ${r.message}`);
+      console.log(`    ${theme.info(r.id)} ${theme.severity(r.severity)} ${theme.faint(`(${r.cwe})`)} ${theme.muted(r.message)}`);
     }
+    console.log("");
   });
 
 program
@@ -312,7 +479,7 @@ program
     const { executeTool } = await import("./tools/index.js");
     const res = await executeTool("generate_payloads", { type }, { workingDirectory: process.cwd() });
     if (!res.success && res.error) {
-      console.error(pc.red(res.error));
+      console.error(formatErrorCard(new Error(res.error)));
       process.exitCode = 1;
       return;
     }
@@ -324,10 +491,12 @@ program
   .description("Actively probe an endpoint parameter with injection vectors")
   .option("-X, --method <method>", "HTTP method (GET, POST)", "GET")
   .action(async (url, param, type, opts) => {
+    const spinner = new Spinner(`Fuzzing ${param} (${type}) on ${url}...`, { stream: process.stderr }).start();
     const { executeTool } = await import("./tools/index.js");
     const res = await executeTool("fuzz_endpoint", { url, param, payloadType: type, method: opts.method }, { workingDirectory: process.cwd() });
+    spinner.stop(true);
     if (!res.success && res.error) {
-      console.error(pc.red(res.error));
+      console.error(formatErrorCard(new Error(res.error)));
       process.exitCode = 1;
       return;
     }
@@ -342,26 +511,30 @@ program
   .option("-s, --scope <mode>", "Scope mode (rdn, fqdn, dn)", "rdn")
   .option("--allow-private", "Allow private/loopback addresses")
   .option("--tls-profile <profile>", "TLS/browser profile (none, chrome, firefox, safari)", "none")
+  .option("--json", "Output raw crawl result as JSON")
   .action(async (url, opts) => {
-    const { executeTool } = await import("./tools/index.js");
-    const res = await executeTool(
-      "crawl_target",
-      {
-        url,
+    const spinner = !opts.json && process.stderr.isTTY ? new Spinner(`Crawling ${url}...`, { stream: process.stderr }).start() : null;
+    try {
+      const { WideCrawler } = await import("./security/crawler.js");
+      const crawler = new WideCrawler();
+      const result = await crawler.crawl(url, {
         maxDepth: Number(opts.depth) || 3,
         maxPages: Number(opts.maxPages) || 80,
         fieldScope: opts.scope || "rdn",
         allowPrivate: Boolean(opts.allowPrivate),
-        tlsProfile: opts.tlsProfile || "none"
-      },
-      { workingDirectory: process.cwd() }
-    );
-    if (!res.success && res.error) {
-      console.error(res.error);
+        tlsProfile: opts.tlsProfile || "none",
+      });
+      spinner?.stop(true);
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(formatCrawlReport(result));
+      }
+    } catch (err: any) {
+      spinner?.stop(true);
+      console.error(formatErrorCard(err));
       process.exitCode = 1;
-      return;
     }
-    console.log(res.output);
   });
 
 program
@@ -371,25 +544,29 @@ program
   .option("-b, --body <body>", "Request body")
   .option("--raw <wire>", "Raw HTTP/1.x wire request")
   .option("--learn", "Generate dated exception drafts")
+  .option("--json", "Output raw inspection report as JSON")
   .action(async (url, opts) => {
-    const { executeTool } = await import("./tools/index.js");
-    const res = await executeTool(
-      "inspect_http_message",
-      {
-        url,
-        method: opts.method,
-        body: opts.body,
-        rawRequest: opts.raw,
-        learning: Boolean(opts.learn),
-      },
-      { workingDirectory: process.cwd() },
-    );
-    if (!res.success && res.error) {
-      console.error(pc.red(res.error));
+    try {
+      const { evaluateHttpInspection } = await import("./security/inspect.js");
+      const report = evaluateHttpInspection(
+        {
+          url,
+          method: opts.method || "GET",
+          headers: {},
+          body: opts.body || "",
+          rawRequest: opts.raw,
+        },
+        { learning: Boolean(opts.learn) },
+      );
+      if (opts.json) {
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        console.log(formatInspectReport(url, opts.method || "GET", report));
+      }
+    } catch (err: any) {
+      console.error(formatErrorCard(err));
       process.exitCode = 1;
-      return;
     }
-    console.log(res.output);
   });
 
 const configCmd = program
@@ -402,12 +579,13 @@ configCmd
   .action(async () => {
     const { configManager } = await import("./config/index.js");
     const cfg = configManager.get();
-    console.log(pc.bold("\nWide CLI Configuration:"));
-    console.log(`  Provider:        ${pc.cyan(cfg.provider)}`);
-    console.log(`  Model:           ${pc.cyan(cfg.model)}`);
-    console.log(`  Ollama URL:      ${pc.dim(cfg.ollamaBaseUrl)}`);
-    console.log(`  Auto-Approve:    Read=${cfg.autoApproveRead}, Write=${cfg.autoApproveWrite}, Run=${cfg.autoApproveRun}`);
-    console.log(`  Config Path:     ${pc.dim("~/.wide/config.json")}\n`);
+    console.log(`\n  ${theme.fgBold("Wide CLI Configuration:")}`);
+    console.log(`    Provider:        ${theme.info(cfg.provider)}`);
+    console.log(`    Model:           ${theme.info(cfg.model)}`);
+    console.log(`    Tool Mode:       ${theme.accent(cfg.toolMode || "full")}`);
+    console.log(`    Ollama URL:      ${theme.faint(cfg.ollamaBaseUrl)}`);
+    console.log(`    Auto-Approve:    Read=${cfg.autoApproveRead}, Write=${cfg.autoApproveWrite}, Run=${cfg.autoApproveRun}`);
+    console.log(`    Config Path:     ${theme.faint("~/.wide/config.json")}\n`);
   });
 
 configCmd
@@ -417,9 +595,9 @@ configCmd
     try {
       const { configManager } = await import("./config/index.js");
       configManager.set(key as any, value);
-      console.log(pc.green(`[OK] Updated '${key}' to '${value}'`));
+      console.log(`  ${theme.ok(glyphs.dot)} Updated '${key}' to '${value}'`);
     } catch (err: any) {
-      console.error(pc.red(`Failed to set config: ${err.message}`));
+      console.error(formatErrorCard(err));
     }
   });
 
@@ -430,9 +608,9 @@ configCmd
     try {
       const { configManager } = await import("./config/index.js");
       configManager.setApiKey(provider as any, apiKey);
-      console.log(pc.green(`[OK] Stored API key for provider '${provider}' in ~/.wide/config.json`));
+      console.log(`  ${theme.ok(glyphs.dot)} Stored API key for provider '${provider}' in ~/.wide/config.json`);
     } catch (err: any) {
-      console.error(pc.red(`Failed to set key: ${err.message}`));
+      console.error(formatErrorCard(err));
     }
   });
 
@@ -445,7 +623,7 @@ const completionCmd = program
       const { generateCompletionScript } = await import("./completion.js");
       console.log(generateCompletionScript(opts.shell));
     } catch (err: any) {
-      console.error(pc.red(`Failed to generate completion: ${err.message}`));
+      console.error(formatErrorCard(err));
       process.exit(1);
     }
   });
@@ -463,12 +641,12 @@ completionCmd
         profilePath: opts.profile,
       });
       if (res.updated) {
-        console.log(pc.green(`[OK] Installed ${res.shell} completion in ${res.profilePath}`));
+        console.log(`  ${theme.ok(glyphs.dot)} Installed ${res.shell} completion in ${theme.info(res.profilePath)}`);
       } else {
-        console.log(pc.cyan(`[OK] ${res.shell} completion already configured in ${res.profilePath}`));
+        console.log(`  ${theme.info(glyphs.dot)} ${res.shell} completion already configured in ${theme.info(res.profilePath)}`);
       }
     } catch (err: any) {
-      console.error(pc.red(`Failed to install completion: ${err.message}`));
+      console.error(formatErrorCard(err));
       process.exit(1);
     }
   });
@@ -491,12 +669,12 @@ hookCmd
         cwd: process.cwd()
       });
       if (res.installed) {
-        console.log(pc.green(`[OK] Pre-commit hook installed to ${res.hookPath}`));
+        console.log(`  ${theme.ok(glyphs.dot)} Pre-commit hook installed to ${theme.info(res.hookPath)}`);
       } else {
-        console.log(pc.cyan(`[OK] ${res.message}`));
+        console.log(`  ${theme.info(glyphs.dot)} ${res.message}`);
       }
     } catch (err: any) {
-      console.error(pc.red(`Failed to install hook: ${err.message}`));
+      console.error(formatErrorCard(err));
       process.exit(1);
     }
   });
@@ -509,12 +687,12 @@ hookCmd
       const { uninstallPreCommitHook } = await import("./hook.js");
       const res = uninstallPreCommitHook({ cwd: process.cwd() });
       if (res.uninstalled) {
-        console.log(pc.green(`[OK] Pre-commit hook removed from ${res.hookPath}`));
+        console.log(`  ${theme.ok(glyphs.dot)} Pre-commit hook removed from ${theme.info(res.hookPath)}`);
       } else {
-        console.log(pc.yellow(`[WARN] ${res.message}`));
+        console.log(`  ${theme.warn(glyphs.warn)} ${res.message}`);
       }
     } catch (err: any) {
-      console.error(pc.red(`Failed to uninstall hook: ${err.message}`));
+      console.error(formatErrorCard(err));
       process.exit(1);
     }
   });
@@ -536,7 +714,7 @@ hookCmd
         process.exit(1);
       }
     } catch (err: any) {
-      console.error(pc.red(`Hook execution failed: ${err.message}`));
+      console.error(formatErrorCard(err));
       process.exit(1);
     }
   });

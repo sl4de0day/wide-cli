@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { configManager } from "../config/index.js";
 import { executeTool } from "../tools/index.js";
 import type { ToolDefinition } from "../tools/types.js";
-import type { ChatMessage, LLMProvider, ProviderResponse } from "./types.js";
+import type { ChatMessage, LLMProvider, ProviderEvent, ProviderResponse } from "./types.js";
 
 export interface ClaudeAuthStatus {
   loggedIn: boolean;
@@ -186,7 +186,7 @@ function buildSpawnSpec(binPath: string, args: string[]): { command: string; arg
     if (script) {
       return { command: process.execPath, args: [script, ...args], shell: false };
     }
-    return { command: binPath, args, shell: true };
+    return { command: "cmd.exe", args: ["/d", "/c", binPath, ...args], shell: false };
   }
   return { command: binPath, args, shell: false };
 }
@@ -523,7 +523,11 @@ export class ClaudeStreamAccumulator {
     return this.rootTextTotal || this.resultText;
   }
 
-  feedLine(line: string, onChunk: (text: string) => void): { done: boolean; sessionNotFound: boolean } {
+  feedLine(
+    line: string,
+    onChunk: (text: string) => void,
+    onEvent?: (event: ProviderEvent) => void,
+  ): { done: boolean; sessionNotFound: boolean } {
     const trimmed = line.trim();
     if (!trimmed) return { done: false, sessionNotFound: false };
     let obj: Record<string, any>;
@@ -541,6 +545,12 @@ export class ClaudeStreamAccumulator {
       const ev = obj.event;
       if (ev.type === "message_start") {
         this.streamedText = "";
+      } else if (ev.type === "content_block_start" && ev.content_block) {
+        if (ev.content_block.type === "thinking") {
+          onEvent?.({ type: "thinking", label: "Reasoning..." });
+        } else if (ev.content_block.type === "tool_use" && ev.content_block.name) {
+          onEvent?.({ type: "tool_start", label: String(ev.content_block.name) });
+        }
       } else if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta" && typeof ev.delta.text === "string") {
         this.streamedText += ev.delta.text;
         this.rootTextTotal += ev.delta.text;
@@ -554,6 +564,8 @@ export class ClaudeStreamAccumulator {
       for (const b of obj.message.content) {
         if (b && b.type === "text" && typeof b.text === "string") {
           full += b.text;
+        } else if (b && b.type === "tool_use" && b.name) {
+          onEvent?.({ type: "tool_start", label: String(b.name) });
         }
       }
       if (full) {
@@ -572,7 +584,23 @@ export class ClaudeStreamAccumulator {
       return { done: false, sessionNotFound: false };
     }
 
+    if (obj.type === "user" && Array.isArray(obj.message?.content)) {
+      for (const b of obj.message.content) {
+        if (b && b.type === "tool_result") {
+          onEvent?.({ type: "tool_end", label: "tool", success: !b.is_error });
+        }
+      }
+      return { done: false, sessionNotFound: false };
+    }
+
     if (obj.type === "result") {
+      if (obj.usage && typeof obj.usage === "object") {
+        onEvent?.({
+          type: "usage",
+          inputTokens: Number(obj.usage.input_tokens || 0),
+          outputTokens: Number(obj.usage.output_tokens || 0),
+        });
+      }
       this.isError = Boolean(obj.is_error || String(obj.subtype || "").startsWith("error"));
       const rawErrors = Array.isArray(obj.errors) ? obj.errors.join("\n") : "";
       this.resultText = typeof obj.result === "string" && obj.result ? obj.result : rawErrors;
@@ -608,6 +636,7 @@ export class ClaudeCodeProvider implements LLMProvider {
   private activeTurnFinish: ((res: { content: string; retryFresh?: boolean; error?: string }) => void) | null = null;
   private activeAccumulator = new ClaudeStreamAccumulator();
   private activeChunkCb: (chunk: string) => void = () => {};
+  private activeEventCb: ((event: ProviderEvent) => void) | undefined;
   private activeStderr: string[] = [];
   private stdoutBuf = "";
 
@@ -658,6 +687,7 @@ export class ClaudeCodeProvider implements LLMProvider {
     tools: ToolDefinition[],
     onChunk: (chunk: string) => void,
     signal?: AbortSignal,
+    onEvent?: (event: ProviderEvent) => void,
   ): Promise<ProviderResponse> {
     const binPath = await claudeCodeBinaryPath();
     if (!binPath) {
@@ -686,7 +716,7 @@ export class ClaudeCodeProvider implements LLMProvider {
 
     const oneShotCompletion = tools.length === 0;
     if (oneShotCompletion) {
-      return await this.runOneShot(binPath, systemMsg, lastUserText, onChunk, signal);
+      return await this.runOneShot(binPath, systemMsg, lastUserText, onChunk, signal, onEvent);
     }
 
     const allowDiskWrites = tools.some((t) => t.name === "write_file" || t.name === "edit_file");
@@ -705,14 +735,14 @@ export class ClaudeCodeProvider implements LLMProvider {
       const useResume = Boolean(this.claudeSessionId && this.syncedMessageCount > 0);
       await this.spawnPersistentWorker(binPath, sig, systemMsg, allowDiskWrites, mcpTools, useResume);
       const firstPrompt = useResume ? lastUserText : `${this.formatPriorHistory(messages, lastUserIdx)}${lastUserText}`;
-      const res = await this.sendTurn(firstPrompt, onChunk, signal);
+      const res = await this.sendTurn(firstPrompt, onChunk, signal, onEvent);
       if (res.retryFresh) {
         this.dispose();
         this.claudeSessionId = "";
         this.syncedMessageCount = 0;
         await this.spawnPersistentWorker(binPath, sig, systemMsg, allowDiskWrites, mcpTools, false);
         const retryPrompt = `${this.formatPriorHistory(messages, lastUserIdx)}${lastUserText}`;
-        const retryRes = await this.sendTurn(retryPrompt, onChunk, signal);
+        const retryRes = await this.sendTurn(retryPrompt, onChunk, signal, onEvent);
         if (retryRes.error) throw new Error(retryRes.error);
         this.syncedMessageCount = messages.length;
         return { content: retryRes.content };
@@ -723,7 +753,7 @@ export class ClaudeCodeProvider implements LLMProvider {
     }
 
     this.activeTools = tools;
-    const res = await this.sendTurn(lastUserText, onChunk, signal);
+    const res = await this.sendTurn(lastUserText, onChunk, signal, onEvent);
     if (res.error) throw new Error(res.error);
     this.syncedMessageCount = messages.length;
     return { content: res.content };
@@ -834,7 +864,7 @@ export class ClaudeCodeProvider implements LLMProvider {
       this.stdoutBuf = lines.pop() ?? "";
       for (const line of lines) {
         if (!this.activeTurnFinish) continue;
-        const { done, sessionNotFound } = this.activeAccumulator.feedLine(line, this.activeChunkCb);
+        const { done, sessionNotFound } = this.activeAccumulator.feedLine(line, this.activeChunkCb, this.activeEventCb);
         if (this.activeAccumulator.sessionId) {
           this.claudeSessionId = this.activeAccumulator.sessionId;
         }
@@ -858,7 +888,7 @@ export class ClaudeCodeProvider implements LLMProvider {
 
     this.proc.on("close", (code) => {
       if (this.stdoutBuf.trim() && this.activeTurnFinish) {
-        this.activeAccumulator.feedLine(this.stdoutBuf, this.activeChunkCb);
+        this.activeAccumulator.feedLine(this.stdoutBuf, this.activeChunkCb, this.activeEventCb);
         this.stdoutBuf = "";
       }
       if (this.activeTurnFinish) {
@@ -880,6 +910,7 @@ export class ClaudeCodeProvider implements LLMProvider {
     promptText: string,
     onChunk: (chunk: string) => void,
     signal?: AbortSignal,
+    onEvent?: (event: ProviderEvent) => void,
   ): Promise<{ content: string; retryFresh?: boolean; error?: string }> {
     return new Promise((resolveTurn) => {
       if (!this.proc || !this.proc.stdin.writable) {
@@ -889,6 +920,7 @@ export class ClaudeCodeProvider implements LLMProvider {
 
       this.activeAccumulator.resetTurn();
       this.activeChunkCb = onChunk;
+      this.activeEventCb = onEvent;
       this.activeStderr = [];
 
       const cleanup = () => {
@@ -941,6 +973,7 @@ export class ClaudeCodeProvider implements LLMProvider {
     userPrompt: string,
     onChunk: (chunk: string) => void,
     signal?: AbortSignal,
+    onEvent?: (event: ProviderEvent) => void,
   ): Promise<ProviderResponse> {
     const cliArgs = [
       "--print",
@@ -1012,7 +1045,7 @@ export class ClaudeCodeProvider implements LLMProvider {
         const lines = buf.split(/\r?\n/);
         buf = lines.pop() ?? "";
         for (const line of lines) {
-          acc.feedLine(line, onChunk);
+          acc.feedLine(line, onChunk, onEvent);
         }
       });
       child.stderr.on("data", (chunk) => {
@@ -1024,7 +1057,7 @@ export class ClaudeCodeProvider implements LLMProvider {
       });
       child.on("close", (code) => {
         if (signal) signal.removeEventListener("abort", onAbort);
-        if (buf.trim()) acc.feedLine(buf, onChunk);
+        if (buf.trim()) acc.feedLine(buf, onChunk, onEvent);
         if (acc.isError) {
           finish(new Error(acc.resultText || stderr.trim() || "Claude Code execution failed."));
           return;

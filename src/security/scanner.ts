@@ -2,7 +2,8 @@ import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { resolve, relative, extname, basename, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import fg from "fast-glob";
-import pc from "picocolors";
+import { horizontalRule, padStartAnsi, termWidth, truncateAnsi } from "../ui/ansi.js";
+import { glyphs, theme } from "../ui/theme.js";
 import { type SecurityRule } from "./rules.js";
 import { RuleLoader } from "./loader.js";
 import { analyzeProjectFlows, buildLogicalSpans } from "./taint.js";
@@ -168,7 +169,7 @@ export class SecurityScanner {
           tool: {
             driver: {
               name: "Wide Security Scanner",
-              version: "0.8.241126",
+              version: "0.9.251126",
               rules: [...rulesMap.values()]
             }
           },
@@ -397,28 +398,78 @@ export class SecurityScanner {
     return this.scanPath(".", minSeverity, { ...options, files });
   }
 
-  public formatCliReport(result: ScanResult): string {
+  public formatCompactReport(result: ScanResult): string {
     if (result.findings.length === 0) {
       return `Wide Security Scan complete: 0 vulnerabilities found in ${result.totalFilesScanned} files scanned.`;
     }
+    return result.findings
+      .map((f) => {
+        const loc = `${f.file}:${f.line || 0}`;
+        const id = f.ruleId || f.id;
+        return `${loc} [${f.severity}] ${id} (${f.cwe}) - ${f.message}`;
+      })
+      .join("\n");
+  }
+
+  public formatCliReport(result: ScanResult, opts: { elapsedMs?: number } = {}): string {
+    const cols = Math.min(termWidth(80) - 2, 100);
+    const dur = typeof opts.elapsedMs === "number" ? ` ${theme.faint(`(${opts.elapsedMs}ms)`)}` : "";
+
+    if (result.findings.length === 0) {
+      return `\n  ${theme.ok(glyphs.dot)} ${theme.fgBold("Wide Security Scan complete:")} 0 vulnerabilities found in ${result.totalFilesScanned} files scanned.${dur}\n`;
+    }
 
     const lines: string[] = [
-      `Wide Security Scan: Found ${result.findings.length} issue(s) across ${result.totalFilesScanned} scanned files.`,
-      `Summary: [CRITICAL: ${result.summary.critical}] [HIGH: ${result.summary.high}] [MEDIUM: ${result.summary.medium}] [LOW: ${result.summary.low}]\n`
+      "",
+      `  ${theme.fgBold("Wide Security Scan:")} Found ${theme.fgBold(String(result.findings.length))} issue(s) across ${result.totalFilesScanned} scanned files.${dur}`,
+      `  ${horizontalRule(Math.max(36, cols))}`,
+      `  Summary: ${theme.pill(`CRITICAL: ${result.summary.critical}`, result.summary.critical > 0 ? "error" : "muted")} ${theme.badge(`HIGH: ${result.summary.high}`, result.summary.high > 0 ? "high" : "muted")} ${theme.badge(`MEDIUM: ${result.summary.medium}`, result.summary.medium > 0 ? "warn" : "muted")} ${theme.badge(`LOW: ${result.summary.low}`, "muted")}`,
+      "",
     ];
 
+    const grouped = new Map<string, Finding[]>();
     for (const f of result.findings) {
-      const sevColor = f.severity === "CRITICAL" ? pc.red(pc.bold(`[${f.severity}]`)) :
-                       f.severity === "HIGH" ? pc.red(`[${f.severity}]`) :
-                       f.severity === "MEDIUM" ? pc.yellow(`[${f.severity}]`) :
-                       pc.gray(`[${f.severity}]`);
+      const key = f.file || "(workspace)";
+      const bucket = grouped.get(key) || [];
+      bucket.push(f);
+      grouped.set(key, bucket);
+    }
 
-      lines.push(`${sevColor} ${pc.bold(f.category)} (${f.cwe}) in ${pc.cyan(`${f.file}:${f.line}`)}`);
-      lines.push(`  Message:     ${f.message}`);
-      lines.push(`  Code:        ${pc.dim(f.snippet)}`);
-      lines.push(`  Remediation: ${pc.green(f.remediation)}\n`);
+    for (const [file, items] of grouped.entries()) {
+      lines.push(`  ${theme.infoBold(file)} ${theme.faint(`(${items.length})`)}`);
+      for (const f of items) {
+        const lineStr = f.line > 0 ? `:${f.line}` : "";
+        const extras: string[] = [];
+        if (f.kev) extras.push(theme.pill("KEV", "error"));
+        if (typeof f.epss === "number" && f.epss >= 0.5) extras.push(theme.badge(`EPSS ${(f.epss * 100).toFixed(0)}%`, "high"));
+        if (f.crossFile) extras.push(theme.badge("TAINT", "info"));
+        const extraStr = extras.length > 0 ? ` ${extras.join(" ")}` : "";
+
+        lines.push(
+          `    ${theme.severity(f.severity)} ${theme.fgBold(f.category)} ${theme.faint(`(${f.cwe})`)} ${theme.info(`${file}${lineStr}`)}${extraStr}`,
+        );
+        lines.push(`      ${theme.fg(f.message)}`);
+        if (f.snippet) {
+          const cleanSnippet = truncateAnsi(f.snippet.replace(/\r?\n/g, " ").trim(), Math.max(24, cols - 18));
+          const ln = padStartAnsi(f.line > 0 ? String(f.line) : "", 4);
+          lines.push(`      ${theme.faint(`${ln} ${glyphs.pipe}`)} ${theme.muted(cleanSnippet)}`);
+          lines.push(`      ${theme.faint(`     ${glyphs.pipe}`)} ${theme.high("^".repeat(Math.min(cleanSnippet.length, 24)))}`);
+        }
+        if (f.remediation) {
+          lines.push(`      ${theme.ok("Fix:")} ${theme.muted(f.remediation)}`);
+        }
+        lines.push("");
+      }
     }
 
     return lines.join("\n");
   }
+}
+
+export function meetsSeverityThreshold(findings: readonly Finding[], failOn?: string): boolean {
+  if (!failOn) return false;
+  const upper = failOn.trim().toUpperCase() as Finding["severity"];
+  const minRank = SEVERITY_RANKS[upper];
+  if (!minRank) return false;
+  return findings.some((f) => (SEVERITY_RANKS[f.severity] || 0) >= minRank);
 }

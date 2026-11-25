@@ -1,4 +1,3 @@
-import pc from "picocolors";
 import type { Agent } from "../agent/index.js";
 import { configManager, type ProviderName, type WideConfig } from "../config/index.js";
 import {
@@ -8,23 +7,37 @@ import {
   listOllamaModels,
   PROVIDER_PRESETS,
 } from "../providers/index.js";
+import { glyphs, theme } from "../ui/theme.js";
+import { askInlineText } from "../ui/tui/composer.js";
+import { runInteractiveSelect, type SelectOption } from "../ui/tui/select.js";
 
 export type PromptQuestionFn = (question: string) => Promise<string>;
 
 type ApiKeyProvider = keyof WideConfig["apiKeys"];
 
-const PROVIDER_CHOICES: Array<{ index: string; name: ProviderName; label: string; needsKey: boolean }> = [
-  { index: "1", name: "gemini", label: "Gemini (Google AI)", needsKey: true },
-  { index: "2", name: "ollama", label: "Ollama (Local models)", needsKey: false },
-  { index: "3", name: "claude", label: "Claude (Anthropic)", needsKey: true },
-  { index: "4", name: "claude-code", label: "Claude Code (Subscription, no API key)", needsKey: false },
-  { index: "5", name: "antigravity", label: "Google Antigravity (CLI sign-in, no API key)", needsKey: false },
-  { index: "6", name: "codex", label: "OpenAI Codex (ChatGPT subscription, no API key)", needsKey: false },
-  { index: "7", name: "deepseek", label: "DeepSeek", needsKey: true },
-  { index: "8", name: "openai", label: "OpenAI", needsKey: true },
+export interface DetectedProviderState {
+  name: ProviderName;
+  label: string;
+  needsKey: boolean;
+  ready: boolean;
+  badge?: string;
+  badgeTone?: "ok" | "warn" | "info" | "muted";
+  detail: string;
+  models: string[];
+}
+
+const PROVIDER_META: Array<{ index: string; name: ProviderName; label: string; needsKey: boolean }> = [
+  { index: "1", name: "antigravity", label: "Google Antigravity", needsKey: false },
+  { index: "2", name: "claude-code", label: "Claude Code", needsKey: false },
+  { index: "3", name: "gemini", label: "Gemini (Google AI)", needsKey: true },
+  { index: "4", name: "claude", label: "Claude (Anthropic)", needsKey: true },
+  { index: "5", name: "ollama", label: "Ollama (Local)", needsKey: false },
+  { index: "6", name: "codex", label: "OpenAI Codex", needsKey: false },
+  { index: "7", name: "openai", label: "OpenAI", needsKey: true },
+  { index: "8", name: "deepseek", label: "DeepSeek", needsKey: true },
 ];
 
-export async function runInteractiveSetup(ask: PromptQuestionFn, agent: Agent, isFirstLaunch = false): Promise<boolean> {
+export async function probeProviderStates(): Promise<DetectedProviderState[]> {
   const cfg = configManager.get();
   const [ollama, claudeAuth, agyStatus] = await Promise.all([
     listOllamaModels(cfg.ollamaBaseUrl),
@@ -32,63 +45,231 @@ export async function runInteractiveSetup(ask: PromptQuestionFn, agent: Agent, i
     checkAntigravityStatus(),
   ]);
 
-  console.log("");
-  if (isFirstLaunch) {
-    console.log(`${pc.yellow("[SETUP]")} ${pc.bold("No AI model provider is configured yet.")}`);
-    console.log(pc.dim("Configure one now to start chatting, or press Enter to skip into the CLI shell.\n"));
-  } else {
-    console.log(`${pc.cyan("[SETUP]")} ${pc.bold("Configure AI Provider & Model")}\n`);
-  }
-
-  for (const item of PROVIDER_CHOICES) {
-    let note = "";
-    if (item.name === "ollama") {
-      note = ollama.reachable
-        ? pc.green(` (running, ${ollama.models.length} model(s))`)
-        : pc.dim(" (not detected on localhost:11434)");
-    } else if (item.name === "claude-code") {
-      note = claudeAuth?.loggedIn
-        ? pc.green(` (signed in${claudeAuth.subscriptionType ? `, ${claudeAuth.subscriptionType}` : ""})`)
-        : claudeAuth
-          ? pc.yellow(" (installed, run 'claude auth login')")
-          : pc.dim(" (uses local claude CLI login)");
-    } else if (item.name === "antigravity") {
-      note = agyStatus.signedIn
-        ? pc.green(` (v${agyStatus.version || "cli"}, signed in, ${agyStatus.models.length} model(s))`)
-        : agyStatus.installed
-          ? pc.yellow(` (v${agyStatus.version || "cli"}, run 'agy' to sign in)`)
-          : pc.dim(" (uses local agy CLI login)");
-    } else if (item.name === "codex") {
-      note = pc.dim(" (uses local codex ChatGPT login)");
-    } else if (configManager.getApiKey(item.name as ApiKeyProvider)) {
-      note = pc.green(" (key saved)");
+  const states: DetectedProviderState[] = PROVIDER_META.map((item) => {
+    if (item.name === "antigravity") {
+      const models = agyStatus.models.length > 0 ? ["default", ...agyStatus.models] : PROVIDER_PRESETS.antigravity;
+      return {
+        name: item.name,
+        label: item.label,
+        needsKey: false,
+        ready: agyStatus.signedIn,
+        badge: agyStatus.signedIn ? "READY" : agyStatus.installed ? "SIGN IN" : undefined,
+        badgeTone: agyStatus.signedIn ? "ok" : agyStatus.installed ? "warn" : "muted",
+        detail: agyStatus.signedIn
+          ? `CLI v${agyStatus.version || "latest"} signed in (${agyStatus.models.length} models)`
+          : agyStatus.installed
+            ? `Installed (v${agyStatus.version || "cli"}), run 'agy' to sign in`
+            : "Local agy CLI sign-in, no API key",
+        models,
+      };
     }
-    console.log(`  ${pc.cyan(item.index)}. ${pc.white(item.label)}${note}`);
-  }
-  console.log(`  ${pc.cyan("0")}. ${pc.dim("Skip for now (use /scan, /rules, /help, !shell)")}\n`);
+    if (item.name === "claude-code") {
+      return {
+        name: item.name,
+        label: item.label,
+        needsKey: false,
+        ready: Boolean(claudeAuth?.loggedIn),
+        badge: claudeAuth?.loggedIn ? "READY" : claudeAuth ? "SIGN IN" : undefined,
+        badgeTone: claudeAuth?.loggedIn ? "ok" : claudeAuth ? "warn" : "muted",
+        detail: claudeAuth?.loggedIn
+          ? `Signed in${claudeAuth.subscriptionType ? ` (${claudeAuth.subscriptionType})` : ""}`
+          : claudeAuth
+            ? "Installed, run 'claude auth login'"
+            : "Local claude CLI subscription, no API key",
+        models: PROVIDER_PRESETS["claude-code"],
+      };
+    }
+    if (item.name === "ollama") {
+      const models = ollama.models.length > 0 ? ollama.models : PROVIDER_PRESETS.ollama;
+      return {
+        name: item.name,
+        label: item.label,
+        needsKey: false,
+        ready: ollama.reachable && ollama.models.length > 0,
+        badge: ollama.reachable ? "RUNNING" : undefined,
+        badgeTone: ollama.reachable ? "ok" : "muted",
+        detail: ollama.reachable
+          ? `${ollama.models.length} local model(s) on ${cfg.ollamaBaseUrl}`
+          : `Not detected at ${cfg.ollamaBaseUrl}`,
+        models,
+      };
+    }
+    if (item.name === "codex") {
+      return {
+        name: item.name,
+        label: item.label,
+        needsKey: false,
+        ready: false,
+        detail: "Local codex CLI ChatGPT sign-in, no API key",
+        models: PROVIDER_PRESETS.codex,
+      };
+    }
+    const hasKey = Boolean(configManager.getApiKey(item.name as ApiKeyProvider));
+    return {
+      name: item.name,
+      label: item.label,
+      needsKey: true,
+      ready: hasKey,
+      badge: hasKey ? "KEY SAVED" : undefined,
+      badgeTone: hasKey ? "ok" : "muted",
+      detail: hasKey ? "API key detected" : "Requires API key",
+      models: PROVIDER_PRESETS[item.name],
+    };
+  });
 
-  const selection = (await ask(`  ${pc.cyan("Provider [1-8, Enter to skip]:")} `)).trim();
+  states.sort((a, b) => Number(b.ready) - Number(a.ready));
+  return states;
+}
+
+export async function tryAutoConnectProvider(agent: Agent): Promise<{ provider: ProviderName; model: string } | null> {
+  if (agent.hasProvider()) return null;
+  const states = await probeProviderStates();
+  const readyLocal = states.filter((s) => s.ready && !s.needsKey);
+  if (readyLocal.length === 1) {
+    const picked = readyLocal[0];
+    const model = picked.models[0] || "default";
+    configManager.set("provider", picked.name);
+    configManager.set("model", model);
+    agent.setProvider(createProvider(picked.name, model));
+    return { provider: picked.name, model };
+  }
+  return null;
+}
+
+export async function runInteractiveSetup(
+  ask: PromptQuestionFn,
+  agent: Agent,
+  isFirstLaunch = false,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const states = await probeProviderStates();
+  const isTty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+
+  if (isTty) {
+    const selectOpts: SelectOption<ProviderName | "__skip__">[] = states.map((st) => ({
+      value: st.name,
+      label: st.label,
+      description: st.detail,
+      badge: st.badge,
+      badgeTone: st.badgeTone,
+    }));
+    selectOpts.push({
+      value: "__skip__",
+      label: "Skip for now",
+      description: "Use /scan, /rules, /doctor, !shell without an AI provider",
+    });
+
+    const chosenName = await runInteractiveSelect({
+      title: isFirstLaunch ? "Wide Provider Setup" : "Switch AI Provider",
+      subtitle: isFirstLaunch
+        ? "Select an AI provider to start chatting (ready local CLIs appear first)."
+        : "Choose a provider and model for this workspace.",
+      options: selectOpts,
+      searchable: false,
+      signal,
+    });
+
+    if (!chosenName || chosenName === "__skip__") {
+      console.log(`  ${theme.faint("Skipped setup. Run /setup or /key <provider> anytime.")}\n`);
+      return false;
+    }
+
+    const chosen = states.find((s) => s.name === chosenName);
+    if (!chosen) return false;
+
+    if (chosen.needsKey) {
+      const keyProvider = chosen.name as ApiKeyProvider;
+      const existing = configManager.getApiKey(keyProvider);
+      const rawKey = await askInlineText(`${chosen.label} API Key`, {
+        masked: true,
+        placeholder: existing ? "Press Enter to keep saved key, or paste a new key" : "Paste API key (input is masked)",
+        signal,
+      });
+      if (rawKey === null) {
+        console.log(`  ${theme.warn(glyphs.warn)} ${theme.muted("Setup cancelled.")}\n`);
+        return false;
+      }
+      const trimmedKey = rawKey.trim();
+      if (!trimmedKey && !existing) {
+        console.log(`  ${theme.warn(glyphs.warn)} ${theme.muted("API key is required for this provider.")}\n`);
+        return false;
+      }
+      if (trimmedKey) {
+        configManager.setApiKey(keyProvider, trimmedKey);
+      }
+    }
+
+    const modelOptions: SelectOption<string>[] = chosen.models.map((m, idx) => ({
+      value: m,
+      label: m,
+      badge: idx === 0 ? "DEFAULT" : undefined,
+      badgeTone: "accent",
+    }));
+    modelOptions.push({
+      value: "__custom__",
+      label: "Custom model name...",
+      description: "Type an exact model identifier",
+    });
+
+    let chosenModel = await runInteractiveSelect({
+      title: `${chosen.label} Model`,
+      options: modelOptions,
+      searchable: chosen.models.length > 6,
+      signal,
+    });
+    if (!chosenModel) {
+      console.log(`  ${theme.warn(glyphs.warn)} ${theme.muted("Model selection cancelled.")}\n`);
+      return false;
+    }
+    if (chosenModel === "__custom__") {
+      const custom = await askInlineText("Custom Model ID", {
+        placeholder: chosen.models[0],
+        signal,
+      });
+      chosenModel = (custom || "").trim() || chosen.models[0];
+    }
+
+    configManager.set("provider", chosen.name);
+    configManager.set("model", chosenModel);
+    agent.setProvider(createProvider(chosen.name, chosenModel));
+    console.log(`  ${theme.ok(glyphs.dot)} Active model set to ${theme.info(`${chosen.name}/${chosenModel}`)}\n`);
+    return true;
+  }
+
+  console.log("");
+  console.log(`  ${theme.accentBold("Setup")} ${theme.fgBold("Configure AI Provider & Model")}\n`);
+  states.forEach((item, idx) => {
+    const tag = item.badge ? ` ${theme.badge(item.badge, item.badgeTone || "muted")}` : "";
+    console.log(`  ${theme.info(String(idx + 1))}. ${theme.fg(item.label)} ${theme.faint(item.detail)}${tag}`);
+  });
+  console.log(`  ${theme.info("0")}. ${theme.faint("Skip for now")}\n`);
+
+  const selection = (await ask(`  ${theme.accent("Provider [1-8, Enter to skip]:")} `)).trim();
   if (!selection || selection === "0" || selection.toLowerCase() === "skip") {
-    console.log(pc.dim("  Skipped setup. Run /setup or /key <provider> <key> anytime.\n"));
+    console.log(`  ${theme.faint("Skipped setup. Run /setup or /key <provider> <key> anytime.")}\n`);
     return false;
   }
 
+  const numericIdx = Number(selection);
   const chosen =
-    PROVIDER_CHOICES.find((c) => c.index === selection || c.name === selection.toLowerCase()) || null;
+    (Number.isInteger(numericIdx) && numericIdx >= 1 && numericIdx <= states.length ? states[numericIdx - 1] : null) ||
+    states.find((c) => c.name === selection.toLowerCase()) ||
+    null;
+
   if (!chosen) {
-    console.log(pc.yellow(`  Unknown selection '${selection}'. Run /setup to try again.\n`));
+    console.log(`  ${theme.warn(glyphs.warn)} Unknown selection '${selection}'. Run /setup to try again.\n`);
     return false;
   }
 
-  if (chosen.needsKey && chosen.name !== "ollama" && chosen.name !== "claude-code" && chosen.name !== "antigravity" && chosen.name !== "codex") {
+  if (chosen.needsKey) {
     const keyProvider = chosen.name as ApiKeyProvider;
     const existing = configManager.getApiKey(keyProvider);
     const keyPrompt = existing
-      ? `  ${pc.cyan(`${chosen.name} API key`)} ${pc.dim("(Enter to keep existing)")}: `
-      : `  ${pc.cyan(`${chosen.name} API key`)} ${pc.dim("(paste key or Enter to cancel)")}: `;
+      ? `  ${theme.accent(`${chosen.name} API key`)} ${theme.faint("(Enter to keep existing)")}: `
+      : `  ${theme.accent(`${chosen.name} API key`)} ${theme.faint("(paste key or Enter to cancel)")}: `;
     const keyInput = (await ask(keyPrompt)).trim();
     if (!keyInput && !existing) {
-      console.log(pc.yellow("  Cancelled setup: API key is required for this provider.\n"));
+      console.log(`  ${theme.warn(glyphs.warn)} Cancelled setup: API key is required.\n`);
       return false;
     }
     if (keyInput) {
@@ -96,21 +277,14 @@ export async function runInteractiveSetup(ask: PromptQuestionFn, agent: Agent, i
     }
   }
 
-  let availableModels = PROVIDER_PRESETS[chosen.name];
-  if (chosen.name === "ollama" && ollama.models.length > 0) {
-    availableModels = ollama.models;
-  } else if (chosen.name === "antigravity" && agyStatus.models.length > 0) {
-    availableModels = ["default", ...agyStatus.models];
-  }
-
-  const defaultModel = availableModels[0];
-  console.log(`\n  ${pc.dim("Suggested models:")} ${availableModels.map((m) => pc.cyan(m)).join(", ")}`);
-  const chosenModel = (await ask(`  ${pc.cyan(`Model [${defaultModel}]:`)} `)).trim() || defaultModel;
+  const defaultModel = chosen.models[0];
+  console.log(`\n  ${theme.faint("Suggested models:")} ${chosen.models.map((m) => theme.info(m)).join(", ")}`);
+  const chosenModel = (await ask(`  ${theme.accent(`Model [${defaultModel}]:`)} `)).trim() || defaultModel;
 
   configManager.set("provider", chosen.name);
   configManager.set("model", chosenModel);
   agent.setProvider(createProvider(chosen.name, chosenModel));
 
-  console.log(`${pc.green("\n[OK]")} Active model set to ${pc.cyan(`${chosen.name}/${chosenModel}`)}\n`);
+  console.log(`\n  ${theme.ok(glyphs.dot)} Active model set to ${theme.info(`${chosen.name}/${chosenModel}`)}\n`);
   return true;
 }

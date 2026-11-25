@@ -2,9 +2,21 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, openSync, readSync, closeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
-import pc from "picocolors";
 import { debugLog } from "../config/logger.js";
+import { theme } from "../ui/theme.js";
 import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
+
+const pc = {
+  bold: (s: string) => theme.fgBold(s),
+  dim: (s: string) => theme.faint(s),
+  cyan: (s: string) => theme.info(s),
+  green: (s: string) => theme.ok(s),
+  yellow: (s: string) => theme.warn(s),
+  red: (s: string) => theme.error(s),
+  white: (s: string) => theme.fgBright(s),
+  gray: (s: string) => theme.muted(s),
+  bgRed: (s: string) => theme.pill(s.trim(), "error"),
+};
 import { assessSqlRisk, isQueryReadOnly } from "./risk.js";
 
 export type DbKind = "sqlite" | "postgres" | "mysql" | "redis";

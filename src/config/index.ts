@@ -22,6 +22,7 @@ export interface WideConfig {
   maxIterations: number;
   toolMode?: CliToolMode;
   allowBrowser?: boolean;
+  mouse?: boolean;
 }
 
 const DEFAULT_CONFIG: WideConfig = {
@@ -35,12 +36,13 @@ const DEFAULT_CONFIG: WideConfig = {
   maxIterations: 25,
   toolMode: "full",
   allowBrowser: true,
+  mouse: true,
 };
 
 export function coerceConfigValue(key: string, raw: unknown): unknown {
   if (typeof raw !== "string") return raw;
   const trimmed = raw.trim();
-  if (key === "autoApproveRead" || key === "autoApproveWrite" || key === "autoApproveRun" || key === "allowBrowser") {
+  if (key === "autoApproveRead" || key === "autoApproveWrite" || key === "autoApproveRun" || key === "allowBrowser" || key === "mouse") {
     if (trimmed === "true" || trimmed === "on" || trimmed === "1") return true;
     if (trimmed === "false" || trimmed === "off" || trimmed === "0") return false;
   }

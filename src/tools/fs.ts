@@ -2,10 +2,10 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import pc from "picocolors";
 import { formatColoredDiffPreview, type DiffPreviewResult } from "../ui/diff.js";
+import { theme } from "../ui/theme.js";
 import { extractDocxText, isDocxPath } from "./docx.js";
-import type { Tool, ToolExecutionContext, ToolResult } from "./types.js";
+import { normalizeApprovalOutcome, type Tool, type ToolExecutionContext, type ToolResult } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -74,27 +74,44 @@ async function confirmWriteAction(
   relPath: string,
   diffResult: DiffPreviewResult,
   context: ToolExecutionContext
-): Promise<boolean> {
-  const summary = `${pc.green(`+${diffResult.added}`)} ${pc.red(`-${diffResult.removed}`)}`;
-  console.log(`\n${pc.cyan(`[${toolName === "write_file" ? "WRITE" : "EDIT"}]`)} ${pc.bold(relPath)} (${summary})`);
-  console.log(diffResult.preview || pc.dim("(New file created)"));
+): Promise<{ allowed: boolean; feedback?: string }> {
+  if (context.permissionProfile === "plan") {
+    return { allowed: false, feedback: "Blocked in Plan mode (read-only). Switch mode with Shift+Tab to modify files." };
+  }
 
-  if (context.autoApproveWrite !== false) return true;
-  if (context.sessionApprovedTools?.has("write")) return true;
-  if (!context.requestApproval) return false;
+  const ruleDecision = context.evaluatePermission?.(toolName, relPath) ?? null;
+  if (ruleDecision === "deny") {
+    return { allowed: false, feedback: `Blocked by permission deny rule for ${relPath}` };
+  }
 
-  const decision = await context.requestApproval({
+  const summary = `${theme.ok(`+${diffResult.added}`)} ${theme.error(`-${diffResult.removed}`)}`;
+  console.log(`\n  ${theme.badge(toolName === "write_file" ? "WRITE" : "EDIT", "accent")} ${theme.fgBold(relPath)} ${theme.faint("(")}${summary}${theme.faint(")")}`);
+  console.log(diffResult.preview || `  ${theme.faint("(New file created)")}`);
+
+  if (ruleDecision === "allow") return { allowed: true };
+  if (ruleDecision !== "ask") {
+    if (context.permissionProfile === "accept-edits" || context.permissionProfile === "auto") return { allowed: true };
+    if (context.permissionProfile !== "ask" && context.autoApproveWrite !== false) return { allowed: true };
+    if (context.sessionApprovedTools?.has("write")) return { allowed: true };
+  }
+  if (!context.requestApproval) return { allowed: false };
+
+  const parentPrefix = dirname(relPath).replace(/\\/g, "/");
+  const suggestedDir = parentPrefix && parentPrefix !== "." ? `${parentPrefix}/` : relPath.replace(/\\/g, "/");
+  const rawOutcome = await context.requestApproval({
     tool: toolName,
     title: `Allow ${toolName} to modify ${relPath}? (+${diffResult.added}/-${diffResult.removed})`,
     detail: relPath,
     preview: diffResult.preview,
     sessionKey: "write",
+    suggestedPattern: `${toolName}(${suggestedDir})`,
   });
-  if (decision === "always") {
+  const outcome = normalizeApprovalOutcome(rawOutcome);
+  if (outcome.decision === "always") {
     context.sessionApprovedTools?.add("write");
-    return true;
+    return { allowed: true };
   }
-  return decision === "once";
+  return { allowed: outcome.decision === "once", feedback: outcome.feedback };
 }
 
 export const readFileTool: Tool = {
@@ -200,11 +217,13 @@ export const writeFileTool: Tool = {
       const relPath = relative(context.workingDirectory, fullPath);
       const parentDir = dirname(fullPath);
 
-      const oldContent = existsSync(fullPath) ? readFileSync(fullPath, "utf8") : "";
+      const existedBefore = existsSync(fullPath);
+      const oldContent = existedBefore ? readFileSync(fullPath, "utf8") : "";
       const diff = formatColoredDiffPreview(relPath, oldContent, params.content, { maxLines: 80 });
-      const allowed = await confirmWriteAction("write_file", relPath, diff, context);
-      if (!allowed) {
-        return { success: false, output: "", error: `Write denied for ${relPath}` };
+      const check = await confirmWriteAction("write_file", relPath, diff, context);
+      if (!check.allowed) {
+        const note = check.feedback ? ` (${check.feedback})` : "";
+        return { success: false, output: "", error: `Write denied for ${relPath}${note}` };
       }
 
       if (!existsSync(parentDir)) {
@@ -212,6 +231,16 @@ export const writeFileTool: Tool = {
       }
 
       writeFileSync(fullPath, params.content, "utf8");
+      context.onFileChange?.({
+        filePath: fullPath,
+        relPath,
+        existedBefore,
+        beforeContent: oldContent,
+        afterContent: params.content,
+        tool: "write_file",
+        added: diff.added,
+        removed: diff.removed,
+      });
       const verifyNote = await verifyModifiedFile(fullPath, context.workingDirectory, relPath);
       return {
         success: true,
@@ -257,12 +286,23 @@ export const editFileTool: Tool = {
 
       const newContent = content.replace(params.target, () => params.replacement);
       const diff = formatColoredDiffPreview(relPath, content, newContent, { maxLines: 80 });
-      const allowed = await confirmWriteAction("edit_file", relPath, diff, context);
-      if (!allowed) {
-        return { success: false, output: "", error: `Edit denied for ${relPath}` };
+      const check = await confirmWriteAction("edit_file", relPath, diff, context);
+      if (!check.allowed) {
+        const note = check.feedback ? ` (${check.feedback})` : "";
+        return { success: false, output: "", error: `Edit denied for ${relPath}${note}` };
       }
 
       writeFileSync(fullPath, newContent, "utf8");
+      context.onFileChange?.({
+        filePath: fullPath,
+        relPath,
+        existedBefore: true,
+        beforeContent: content,
+        afterContent: newContent,
+        tool: "edit_file",
+        added: diff.added,
+        removed: diff.removed,
+      });
       const verifyNote = await verifyModifiedFile(fullPath, context.workingDirectory, relPath);
       return {
         success: true,

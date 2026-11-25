@@ -1,8 +1,8 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, unlinkSync, chmodSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import pc from "picocolors";
 import { SecurityScanner, type Finding } from "./security/scanner.js";
+import { glyphs, theme } from "./ui/theme.js";
 
 export interface HookInstallOptions {
   failOn?: string;
@@ -163,13 +163,13 @@ export async function runPreCommitHook(opts: HookRunOptions = {}): Promise<{
     .filter((f) => f.length > 0);
 
   if (stagedFiles.length === 0) {
-    console.log(pc.green("[OK] No staged files to check."));
+    console.log(`  ${theme.ok(glyphs.dot)} No staged files to check.`);
     return { blocked: false, findings: [], totalFilesScanned: 0 };
   }
 
   const existingFiles = stagedFiles.filter((f) => existsSync(resolve(repoRoot, f)));
   if (existingFiles.length === 0) {
-    console.log(pc.green("[OK] No existing staged files to check."));
+    console.log(`  ${theme.ok(glyphs.dot)} No existing staged files to check.`);
     return { blocked: false, findings: [], totalFilesScanned: 0 };
   }
 
@@ -182,26 +182,16 @@ export async function runPreCommitHook(opts: HookRunOptions = {}): Promise<{
 
   if (blockingFindings.length > 0) {
     console.log(
-      pc.bold(
-        pc.red(
-          `\n[WIDE HOOK] Security check failed: ${blockingFindings.length} issue(s) at or above ${failOn} severity:`
-        )
-      )
+      `\n  ${theme.pill("WIDE HOOK", "error")} ${theme.errorBold(`Security check failed: ${blockingFindings.length} issue(s) at or above ${failOn} severity:`)}`,
     );
     for (const f of blockingFindings) {
-      const sevBadge =
-        f.severity === "CRITICAL"
-          ? pc.bgRed(pc.white(` ${f.severity} `))
-          : pc.red(`[${f.severity}]`);
-      console.log(`  ${sevBadge} ${pc.bold(f.file)}:${f.line} - ${f.message} (${pc.dim(f.id)})`);
+      console.log(`    ${theme.severity(f.severity)} ${theme.infoBold(`${f.file}:${f.line}`)} ${theme.fg(f.message)} ${theme.faint(`(${f.id})`)}`);
       if (f.snippet) {
-        console.log(`    ${pc.dim(f.snippet.trim())}`);
+        console.log(`      ${theme.faint(f.snippet.trim())}`);
       }
     }
     console.log(
-      pc.yellow(
-        "\nCommit blocked. Address the security vulnerabilities or suppress with '// wide-ignore <rule-id>' before committing.\n"
-      )
+      `\n  ${theme.warn(glyphs.warn)} ${theme.warn("Commit blocked. Address the findings or suppress with '// wide-ignore <rule-id>' before committing.")}\n`,
     );
     return {
       blocked: true,
@@ -211,9 +201,7 @@ export async function runPreCommitHook(opts: HookRunOptions = {}): Promise<{
   }
 
   console.log(
-    pc.green(
-      `[OK] Wide pre-commit check passed (${result.totalFilesScanned} staged file(s) scanned, 0 blocking findings).`
-    )
+    `  ${theme.ok(glyphs.dot)} Wide pre-commit check passed (${result.totalFilesScanned} staged file(s) scanned, 0 blocking findings).`,
   );
   return {
     blocked: false,

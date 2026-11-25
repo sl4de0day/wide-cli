@@ -139,3 +139,30 @@ export function loadLatestSession(): SavedSession | null {
   const sessions = listSessions(1);
   return sessions[0] || null;
 }
+
+export function deleteSession(id: string): boolean {
+  const cleanId = sanitizeSessionId(id);
+  if (!cleanId) return false;
+  const full = join(getSessionsDir(), `${cleanId}.json`);
+  if (!existsSync(full)) return false;
+  try {
+    unlinkSync(full);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function formatRelativeTime(iso: string): string {
+  const ts = Date.parse(iso || "");
+  if (!Number.isFinite(ts)) return "";
+  const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (diffSec < 60) return "just now";
+  const mins = Math.floor(diffSec / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days === 1) return "yesterday";
+  return `${days}d ago`;
+}

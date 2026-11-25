@@ -101,6 +101,7 @@ async function runTests() {
   await import("./repl.test.mjs");
   await import("./database.test.mjs");
   await import("./cli-ux.test.mjs");
+  await import("./ui-tui.test.mjs");
   await import("./security.test.mjs");
   await import("./inspect.test.mjs");
   await import("./crawler.test.mjs");

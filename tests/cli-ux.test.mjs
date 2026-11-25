@@ -18,8 +18,10 @@ async function runCliUxTests() {
   assert.strictEqual(diffRes.removed, 1);
   assert.strictEqual(diffRes.hunks, 1);
   assert.strictEqual(diffRes.truncated, 0);
-  assert.ok(diffRes.preview.includes("\x1b[32m+line 5 updated"));
-  assert.ok(diffRes.preview.includes("\x1b[31m-line 5"));
+  assert.ok(diffRes.preview.includes("\x1b[38;2;163;190;140m"));
+  assert.ok(diffRes.preview.includes("\x1b[38;2;191;97;106m"));
+  assert.ok(diffRes.preview.includes("updated"));
+  assert.ok(diffRes.preview.replace(/\x1b\[[0-9;]*m/g, "").includes("-line 5"));
 
   const hugeOld = Array.from({ length: 120 }, (_, i) => `row ${i}`).join("\n");
   const hugeNew = Array.from({ length: 120 }, (_, i) => `row ${i} changed`).join("\n");

@@ -1,10 +1,14 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
-import pc from "picocolors";
 import { createOptionalProvider } from "./providers/index.js";
 import { SecurityScanner, type Finding } from "./security/scanner.js";
+import { displayWidth, horizontalRule, termWidth } from "./ui/ansi.js";
 import { formatColoredDiffPreview } from "./ui/diff.js";
+import { Spinner } from "./ui/spinner.js";
+import { glyphs, theme } from "./ui/theme.js";
+import { InlineDock, type DockHitRegion } from "./ui/tui/dock.js";
+import { disableTerminalInputModes, enableTerminalInputModes, RawKeyParser } from "./ui/tui/keys.js";
 
 export interface FixOptions {
   path?: string;
@@ -54,16 +58,93 @@ export function createQuickFixSuppression(finding: Finding, originalLine: string
   return `${indent}${commentChar} wide-ignore ${ruleId}\n${originalLine}`;
 }
 
-async function promptUser(question: string): Promise<string> {
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
-  return new Promise((resolvePrompt) => {
-    rl.question(question, (answer) => {
-      rl.close();
-      resolvePrompt(answer.trim().toLowerCase());
+async function promptSingleKeyDecision(relFile: string, allowSuppressSwitch: boolean): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    return new Promise((resolvePrompt) => {
+      rl.question(`  Apply fix to ${relFile}? [y]es / [n]o / [a]ll / [q]uit: `, (answer) => {
+        rl.close();
+        resolvePrompt(answer.trim().toLowerCase() || "y");
+      });
     });
+  }
+
+  return new Promise((resolveKey) => {
+    const dock = new InlineDock(process.stdout);
+    const buttons: Array<{ key: string; text: string }> = [
+      { key: "y", text: `${theme.ok("[y]")} apply` },
+      { key: "n", text: `${theme.muted("[n]")} skip` },
+    ];
+    if (allowSuppressSwitch) {
+      buttons.push({ key: "s", text: `${theme.info("[s]")} suppress` });
+    }
+    buttons.push(
+      { key: "a", text: `${theme.info("[a]")} all` },
+      { key: "q", text: `${theme.warn("[q]")} quit` },
+    );
+
+    const prefix = `  ${theme.accentBold(glyphs.pointer)} ${theme.fg(`Apply to ${relFile}?`)}  `;
+    const sep = ` ${glyphs.middot} `;
+    const sepW = displayWidth(sep);
+    const regions: DockHitRegion[] = [];
+    let col = displayWidth(prefix);
+    for (const b of buttons) {
+      const w = displayWidth(b.text);
+      regions.push({ id: b.key, row: 0, startCol: col, endCol: col + w });
+      col += w + sepW;
+    }
+    const line = `${prefix}${buttons.map((b) => b.text).join(sep)}`;
+
+    let settled = false;
+    const finish = (choice: string) => {
+      if (settled) return;
+      settled = true;
+      process.stdin.off("data", onData);
+      parser.dispose();
+      dock.clear();
+      disableTerminalInputModes();
+      resolveKey(choice);
+    };
+
+    const parser = new RawKeyParser((ev) => {
+      if (settled) return;
+      if (ev.name === "cpr" && ev.cpr) {
+        dock.handleCpr(ev.cpr.row, ev.cpr.col);
+        return;
+      }
+      if (ev.name === "mouse" && ev.mouse) {
+        if (ev.mouse.action === "press" && ev.mouse.button === "right") {
+          finish("q");
+          return;
+        }
+        if (ev.mouse.action === "press" && ev.mouse.button === "left") {
+          const hit = dock.hitTest(ev.mouse.col, ev.mouse.row);
+          if (hit) finish(hit.id);
+        }
+        return;
+      }
+      if (ev.name === "escape" || (ev.ctrl && ev.name === "c")) {
+        finish("q");
+        return;
+      }
+      if (ev.name === "return") {
+        finish("y");
+        return;
+      }
+      if (ev.name === "text" && ev.text) {
+        const ch = ev.text.toLowerCase();
+        if (ch === "y" || ch === "n" || ch === "a" || ch === "q" || (allowSuppressSwitch && ch === "s")) {
+          finish(ch);
+        }
+      }
+    });
+
+    const onData = (chunk: Buffer | string) => parser.feed(chunk);
+    enableTerminalInputModes();
+    process.stdin.resume();
+    process.stdin.on("data", onData);
+    dock.setHitRegions(regions);
+    dock.render([line], null, { queryPosition: true });
   });
 }
 
@@ -73,16 +154,20 @@ export async function runInteractiveFix(opts: FixOptions = {}): Promise<FixSumma
   const scanner = new SecurityScanner(cwd, opts.rulesPath);
   const filter = (opts.severity || "HIGH") as Finding["severity"] | "ALL";
 
-  console.log(pc.cyan(`Scanning for fixable vulnerabilities in ${targetPath} (severity >= ${filter})...`));
+  const scanSpinner = new Spinner(`Scanning ${targetPath} for fixable issues (severity >= ${filter})...`, {
+    stream: process.stderr,
+  });
+  scanSpinner.start();
   const scanResult = await scanner.scanPath(targetPath, filter, { sca: false });
+  scanSpinner.stop(true);
 
   const codeFindings = scanResult.findings.filter((f) => f.source !== "sca" && f.line > 0);
   if (codeFindings.length === 0) {
-    console.log(pc.green(`No fixable code vulnerabilities found at severity threshold ${filter}.`));
+    console.log(`  ${theme.ok(glyphs.dot)} No fixable code vulnerabilities found at severity threshold ${filter}.`);
     return { totalFindings: 0, fixed: 0, skipped: 0, filesModified: [] };
   }
 
-  console.log(pc.bold(`Found ${codeFindings.length} vulnerability candidate(s) for interactive remediation.\n`));
+  console.log(`\n  ${theme.fgBold(`Found ${codeFindings.length} remediation candidate(s)`)} ${theme.faint(`(severity >= ${filter})`)}\n`);
 
   let provider = null;
   if (!opts.suppressOnly && (opts.ai || opts.provider || opts.model)) {
@@ -101,7 +186,9 @@ export async function runInteractiveFix(opts: FixOptions = {}): Promise<FixSumma
   let autoApproveAll = Boolean(opts.yes);
   let totalFixed = 0;
   let totalSkipped = 0;
+  let candidateIndex = 0;
   const modifiedFilesSet = new Set<string>();
+  const ruleW = Math.min(termWidth(80) - 4, 96);
 
   for (const [relFile, fileFindings] of byFile.entries()) {
     const fullPath = resolve(cwd, relFile);
@@ -110,6 +197,7 @@ export async function runInteractiveFix(opts: FixOptions = {}): Promise<FixSumma
     fileFindings.sort((a, b) => b.line - a.line);
 
     for (const finding of fileFindings) {
+      candidateIndex++;
       let currentContent = "";
       try {
         currentContent = readFileSync(fullPath, "utf8");
@@ -132,6 +220,10 @@ export async function runInteractiveFix(opts: FixOptions = {}): Promise<FixSumma
       let patchSource = "quick-fix";
 
       if (provider && !opts.suppressOnly) {
+        const aiSpinner = new Spinner(`Synthesizing AI patch for ${relFile}:${finding.line}...`, {
+          stream: process.stderr,
+        });
+        aiSpinner.start();
         try {
           const windowStart = Math.max(0, lineIdx - 8);
           const windowEnd = Math.min(lines.length, endLineIdx + 8);
@@ -159,7 +251,10 @@ export async function runInteractiveFix(opts: FixOptions = {}): Promise<FixSumma
             replacementBlock = alignPatchIndentation(extracted, originalLine);
             patchSource = "ai-remediation";
           }
-        } catch {}
+        } catch {
+        } finally {
+          aiSpinner.stop(true);
+        }
       }
 
       if (!replacementBlock) {
@@ -167,13 +262,10 @@ export async function runInteractiveFix(opts: FixOptions = {}): Promise<FixSumma
         patchSource = "quick-fix suppression";
       }
 
-      const patchedLines = [
-        ...lines.slice(0, lineIdx),
-        ...replacementBlock.split("\n"),
-        ...lines.slice(endLineIdx + 1)
-      ];
-      const patchedContent = patchedLines.join("\n");
+      const buildPatched = (block: string) =>
+        [...lines.slice(0, lineIdx), ...block.split("\n"), ...lines.slice(endLineIdx + 1)].join("\n");
 
+      let patchedContent = buildPatched(replacementBlock);
       if (patchedContent === currentContent) {
         totalSkipped++;
         continue;
@@ -181,30 +273,34 @@ export async function runInteractiveFix(opts: FixOptions = {}): Promise<FixSumma
 
       const diffPreview = formatColoredDiffPreview(relFile, currentContent, patchedContent);
 
+      console.log(`  ${horizontalRule(Math.max(36, ruleW), `${candidateIndex}/${codeFindings.length}`)}`);
       console.log(
-        pc.bold(
-          `\n--------------------------------------------------------------------------------\n` +
-          `${pc.cyan("[CANDIDATE]")} ${pc.bold(relFile)}:${finding.line} ` +
-          `[${finding.severity}] ${finding.message} (${patchSource})`
-        )
+        `  ${theme.severity(finding.severity)} ${theme.infoBold(`${relFile}:${finding.line}`)} ${theme.fg(finding.message)} ${theme.faint(`(${patchSource})`)}`,
       );
       console.log(diffPreview.preview);
+      console.log("");
 
       let decision = "y";
       if (!autoApproveAll) {
         if (opts.askFn) {
-          decision = await opts.askFn(`Apply this patch? [y/n/a/q]: `);
+          decision = (await opts.askFn(`Apply this patch? [y/n/a/q]: `)).trim().toLowerCase();
         } else if (process.stdin.isTTY) {
-          const ans = await promptUser(pc.bold(pc.cyan(`Apply this fix to ${relFile}? [y]es / [n]o / [a]ll / [q]uit: `)));
-          decision = ans || "y";
+          decision = await promptSingleKeyDecision(relFile, patchSource === "ai-remediation");
         } else {
-          console.log(pc.yellow(`Non-interactive environment without --yes. Skipping fix.`));
+          console.log(`  ${theme.warn(glyphs.warn)} Non-interactive environment without --yes. Skipping fix.`);
           decision = "n";
         }
       }
 
+      if (decision === "s" && patchSource === "ai-remediation") {
+        replacementBlock = createQuickFixSuppression(finding, originalBlock);
+        patchedContent = buildPatched(replacementBlock);
+        patchSource = "quick-fix suppression";
+        decision = "y";
+      }
+
       if (decision === "q" || decision === "quit") {
-        console.log(pc.yellow(`Aborted interactive fix session.`));
+        console.log(`  ${theme.warn(glyphs.warn)} Aborted interactive fix session.`);
         return {
           totalFindings: codeFindings.length,
           fixed: totalFixed,
@@ -220,24 +316,22 @@ export async function runInteractiveFix(opts: FixOptions = {}): Promise<FixSumma
 
       if (decision === "y" || decision === "yes") {
         if (opts.dryRun) {
-          console.log(pc.yellow(`[DRY-RUN] Would apply patch to ${relFile}:${finding.line}`));
+          console.log(`  ${theme.warn("[DRY-RUN]")} Would apply patch to ${theme.info(`${relFile}:${finding.line}`)}`);
         } else {
           writeFileSync(fullPath, patchedContent, "utf8");
-          console.log(pc.green(`[OK] Applied fix to ${relFile}:${finding.line}`));
+          console.log(`  ${theme.ok(glyphs.dot)} Applied ${patchSource} to ${theme.info(`${relFile}:${finding.line}`)}`);
           modifiedFilesSet.add(relFile);
         }
         totalFixed++;
       } else {
-        console.log(pc.dim(`Skipped fix for ${relFile}:${finding.line}`));
+        console.log(`  ${theme.faint(`Skipped ${relFile}:${finding.line}`)}`);
         totalSkipped++;
       }
     }
   }
 
   console.log(
-    pc.bold(
-      `\nWide Fix Complete: ${totalFixed} patch(es) applied, ${totalSkipped} skipped across ${modifiedFilesSet.size} modified file(s).\n`
-    )
+    `\n  ${theme.ok(glyphs.dot)} ${theme.fgBold("Wide Fix Complete:")} ${totalFixed} patch(es) applied, ${totalSkipped} skipped across ${modifiedFilesSet.size} modified file(s).\n`,
   );
 
   return {

@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ToolDefinition } from "../tools/types.js";
 import { filterCliToolsForClaudeMcp, startCliToolBridge, type CliBridgeHandle } from "./claude-code.js";
-import type { ChatMessage, LLMProvider, ProviderResponse } from "./types.js";
+import type { ChatMessage, LLMProvider, ProviderEvent, ProviderResponse } from "./types.js";
 
 const EFFORT_SUFFIX_RE = /^(.*?)-(low|medium|high|xhigh|max)$/i;
 
@@ -30,7 +30,11 @@ export class AntigravityStreamAccumulator {
     return this.chunks.join("") || this.resultText;
   }
 
-  public feedLine(line: string, onChunk: (chunk: string) => void): AntigravityCliEventResult {
+  public feedLine(
+    line: string,
+    onChunk: (chunk: string) => void,
+    onEvent?: (event: ProviderEvent) => void,
+  ): AntigravityCliEventResult {
     const trimmed = String(line ?? "").trim();
     if (!trimmed) {
       return { done: false, sessionNotFound: false };
@@ -52,16 +56,30 @@ export class AntigravityStreamAccumulator {
     }
 
     if (eventType === "init") {
+      onEvent?.({ type: "status", label: "Connected to Antigravity" });
       return { done: false, sessionNotFound: false, ...(cid ? { conversationId: cid } : {}) };
     }
 
     if (eventType === "step_update") {
       const su = parsed.step_update;
-      if (su && typeof su === "object" && su.step_type === "agent_response") {
-        const delta = typeof su.text_delta === "string" ? su.text_delta : "";
-        if (delta) {
-          this.chunks.push(delta);
-          onChunk(delta);
+      if (su && typeof su === "object") {
+        if (su.step_type === "agent_response") {
+          const delta = typeof su.text_delta === "string" ? su.text_delta : "";
+          if (delta) {
+            this.chunks.push(delta);
+            onChunk(delta);
+          }
+        } else if (su.step_type === "thinking" || su.step_type === "thought" || su.step_type === "reasoning") {
+          onEvent?.({ type: "thinking", label: "Reasoning..." });
+        } else if (su.step_type) {
+          const toolLabel = String(su.tool_name ?? su.name ?? su.step_type).replace(/_/g, " ");
+          const status = String(su.status ?? "").toLowerCase();
+          if (status === "done" || status === "completed" || status === "error" || status === "failed") {
+            onEvent?.({ type: "tool_end", label: toolLabel, success: status !== "error" && status !== "failed" });
+          } else {
+            const detail = typeof su.summary === "string" ? su.summary : typeof su.path === "string" ? su.path : undefined;
+            onEvent?.({ type: "tool_start", label: toolLabel, detail });
+          }
         }
       }
       return { done: false, sessionNotFound: false };
@@ -332,6 +350,7 @@ export class AntigravityProvider implements LLMProvider {
   private activeTurnFinish: ((res: { content: string; retryFresh?: boolean; error?: string }) => void) | null = null;
   private activeAccumulator = new AntigravityStreamAccumulator();
   private activeChunkCb: (chunk: string) => void = () => {};
+  private activeEventCb: ((event: ProviderEvent) => void) | undefined;
   private activeStderr: string[] = [];
   private stdoutBuf = "";
 
@@ -394,6 +413,7 @@ export class AntigravityProvider implements LLMProvider {
     tools: ToolDefinition[],
     onChunk: (chunk: string) => void,
     signal?: AbortSignal,
+    onEvent?: (event: ProviderEvent) => void,
   ): Promise<ProviderResponse> {
     const binPath = await antigravityBinaryPath();
     if (!binPath) {
@@ -411,7 +431,7 @@ export class AntigravityProvider implements LLMProvider {
 
     if (tools.length === 0) {
       const promptText = this.formatPrompt(systemMsg, messages, lastUserIdx, true);
-      return await this.runOneShot(binPath, promptText, onChunk, signal);
+      return await this.runOneShot(binPath, promptText, onChunk, signal, onEvent);
     }
 
     const allowDiskWrites = tools.some((t) => t.name === "write_file" || t.name === "edit_file");
@@ -433,14 +453,14 @@ export class AntigravityProvider implements LLMProvider {
       }
       this.spawnWorker(binPath, sig, allowDiskWrites, useResume ? this.conversationId : "");
       const firstPrompt = this.formatPrompt(systemMsg, messages, lastUserIdx, !useResume);
-      const res = await this.sendTurn(firstPrompt, onChunk, signal);
+      const res = await this.sendTurn(firstPrompt, onChunk, signal, onEvent);
       if (res.retryFresh) {
         this.dispose();
         this.conversationId = "";
         this.syncedMessageCount = 0;
         this.spawnWorker(binPath, sig, allowDiskWrites, "");
         const retryPrompt = this.formatPrompt(systemMsg, messages, lastUserIdx, true);
-        const retryRes = await this.sendTurn(retryPrompt, onChunk, signal);
+        const retryRes = await this.sendTurn(retryPrompt, onChunk, signal, onEvent);
         if (retryRes.error) throw new Error(retryRes.error);
         this.syncedMessageCount = messages.length + 1;
         return { content: retryRes.content };
@@ -451,14 +471,14 @@ export class AntigravityProvider implements LLMProvider {
     }
 
     const nextPrompt = lastUserIdx >= 0 ? messages[lastUserIdx].content : messages.map((m) => m.content).join("\n");
-    const res = await this.sendTurn(nextPrompt, onChunk, signal);
+    const res = await this.sendTurn(nextPrompt, onChunk, signal, onEvent);
     if (res.retryFresh) {
       this.dispose();
       this.conversationId = "";
       this.syncedMessageCount = 0;
       this.spawnWorker(binPath, sig, allowDiskWrites, "");
       const retryPrompt = this.formatPrompt(systemMsg, messages, lastUserIdx, true);
-      const retryRes = await this.sendTurn(retryPrompt, onChunk, signal);
+      const retryRes = await this.sendTurn(retryPrompt, onChunk, signal, onEvent);
       if (retryRes.error) throw new Error(retryRes.error);
       this.syncedMessageCount = messages.length + 1;
       return { content: retryRes.content };
@@ -498,7 +518,7 @@ export class AntigravityProvider implements LLMProvider {
       this.stdoutBuf = lines.pop() ?? "";
       for (const line of lines) {
         if (!this.activeTurnFinish) continue;
-        const { done, sessionNotFound } = this.activeAccumulator.feedLine(line, this.activeChunkCb);
+        const { done, sessionNotFound } = this.activeAccumulator.feedLine(line, this.activeChunkCb, this.activeEventCb);
         if (this.activeAccumulator.conversationId) {
           this.conversationId = this.activeAccumulator.conversationId;
         }
@@ -522,7 +542,7 @@ export class AntigravityProvider implements LLMProvider {
 
     this.proc.on("close", (code) => {
       if (this.stdoutBuf.trim() && this.activeTurnFinish) {
-        this.activeAccumulator.feedLine(this.stdoutBuf, this.activeChunkCb);
+        this.activeAccumulator.feedLine(this.stdoutBuf, this.activeChunkCb, this.activeEventCb);
         this.stdoutBuf = "";
       }
       if (this.activeTurnFinish) {
@@ -547,6 +567,7 @@ export class AntigravityProvider implements LLMProvider {
     promptText: string,
     onChunk: (chunk: string) => void,
     signal?: AbortSignal,
+    onEvent?: (event: ProviderEvent) => void,
   ): Promise<{ content: string; retryFresh?: boolean; error?: string }> {
     return new Promise((resolveTurn) => {
       if (!this.proc || !this.proc.stdin.writable) {
@@ -556,6 +577,7 @@ export class AntigravityProvider implements LLMProvider {
 
       this.activeAccumulator.resetTurn();
       this.activeChunkCb = onChunk;
+      this.activeEventCb = onEvent;
       this.activeStderr = [];
 
       const cleanup = () => {
@@ -607,6 +629,7 @@ export class AntigravityProvider implements LLMProvider {
     promptText: string,
     onChunk: (chunk: string) => void,
     signal?: AbortSignal,
+    onEvent?: (event: ProviderEvent) => void,
   ): Promise<ProviderResponse> {
     const cliArgs = buildAntigravityCliArgs({
       model: this.normalizeModelArg(),
@@ -656,7 +679,7 @@ export class AntigravityProvider implements LLMProvider {
         const lines = buf.split(/\r?\n/);
         buf = lines.pop() ?? "";
         for (const line of lines) {
-          acc.feedLine(line, onChunk);
+          acc.feedLine(line, onChunk, onEvent);
         }
       });
 
@@ -667,7 +690,7 @@ export class AntigravityProvider implements LLMProvider {
       child.on("error", (err) => finish(err));
 
       child.on("close", (code) => {
-        if (buf.trim()) acc.feedLine(buf, onChunk);
+        if (buf.trim()) acc.feedLine(buf, onChunk, onEvent);
         if (code !== 0 && !acc.getFullText() && !acc.isError) {
           return finish(new Error(stderr.trim() || `Antigravity exited with code ${code ?? "unknown"}`));
         }
